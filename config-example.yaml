@@ -1,0 +1,19 @@
+app:
+  network: # main/test
+
+db:
+  url: #sqlite db path
+
+key:
+  wif_path: #wif path use .txt file
+  mnemonic_path:
+  password: #password in case of new key
+
+#taal
+arc:
+  token:
+  broadcast_url:
+
+#whatsonchain
+woc:
+  token:
