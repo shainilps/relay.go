@@ -5,14 +5,16 @@ import (
 )
 
 type Broadcaster struct {
-	WOCToken  string
-	TaalToken string
+	WOCToken         string
+	TaalMainNetToken string
+	TaalTestNetToken string
 }
 
 func NewBoradcaster() *Broadcaster {
 	return &Broadcaster{
-		TaalToken: viper.GetString(""),
-		WOCToken:  viper.GetString(""),
+		TaalMainNetToken: viper.GetString("taal.mainnnet_token"),
+		TaalTestNetToken: viper.GetString("taal.testnet_token"),
+		WOCToken:         viper.GetString("woc.token"),
 	}
 }
 
