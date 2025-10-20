@@ -5,6 +5,7 @@ go 1.25.2
 require (
 	github.com/bsv-blockchain/go-sdk v1.2.10
 	github.com/mattn/go-sqlite3 v1.14.32
+	github.com/rabbitmq/amqp091-go v1.10.0
 	github.com/spf13/viper v1.21.0
 )
 

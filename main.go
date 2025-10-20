@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/shainilps/relay/internal/config"
+	"github.com/shainilps/relay/internal/db"
 	"github.com/shainilps/relay/internal/keymanager"
 )
 
@@ -17,4 +18,6 @@ func init() {
 }
 
 func main() {
+	db := db.NewClient()
 }
+

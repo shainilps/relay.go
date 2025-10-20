@@ -1,18 +1,16 @@
 app:
-  network: 
+  network:
 
 db:
-  url: 
+  path:
 
 key:
-  wif_path: 
-  mnemonic_path: 
+  wif_path:
+  mnemonic_path:
   password:
-
 
 arc:
   token:
-  broadcast_url:
 
 woc:
   token:

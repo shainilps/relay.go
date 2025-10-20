@@ -1,24 +1,32 @@
 -- +goose Up
 -- +goose StatementBegin
 
+-- gonna keep track of all the transaction that go through here 
 CREATE TABLE transactions(
-    txid TEXT PRIMARY KEY,
-    txhex TEXT,
-    height BIGINT,
-    network TEXT CHECK(network IN ('main', 'test'))
-    status TEXT DEFAULT 'UNSYNCED' CHECK (status IN ('UNSYNCED','SYNCED'))
+    tx_id TEXT PRIMARY KEY,
+    tx_hex TEXT NOT NULL,
+    height BIGINT DEFAULT 0,
+    network TEXT NOT NULL CHECK(network IN ('MAIN', 'TEST')),
+    status TEXT DEFAULT 'UNSYNCED' CHECK (status IN ('UNSYNCED','SYNCED')),
+    created_at TEXT DEFAULT (CURRENT_TIMESTAMP)
 );
 
-CREATE TABLE utxos(
+-- only store funding utxo for queue
+CREATE TABLE funding_utxos(
     utxo_id TEXT PRIMARY KEY,
-    txid TEXT REFERENCES transactions(txid),
-    vout INT,
-    locking_script TEXT
+    tx_id TEXT NOT NULL,  
+    vout INT NOT NULL,
+    locking_script TEXT NOT NULL,
+    spent_tx_id TEXT REFERENCES transactions(tx_id),
+    created_at TEXT DEFAULT (CURRENT_TIMESTAMP)
 );
+
 -- +goose StatementEnd
 
 -- +goose Down
 -- +goose StatementBegin
-DROP TABLE transactions;
-DROP TABLE utxos;
+
+-- DROP TABLE transactions; 
+-- DROP TABLE utxos;
+
 -- +goose StatementEnd

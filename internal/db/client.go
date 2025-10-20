@@ -2,22 +2,28 @@ package db
 
 import (
 	"database/sql"
-	"log"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/spf13/viper"
 )
 
-func NewClient() *sql.DB {
-	db, err := sql.Open("sqlite3", "./.db")
-	if err != nil {
-		log.Fatalf("db connection error: %v", err)
+func NewClient() (*sql.DB, error) {
+
+	//default
+	path := "./database.db"
+
+	if viper.GetString("db.path") != "" {
+		path = viper.GetString("db.path")
 	}
-	defer db.Close()
+
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		return nil, err
+	}
 
 	if err := db.Ping(); err != nil {
-		log.Fatalf("db connecton error: %v", err)
+		return nil, err
 	}
 
-	log.Println("Connected to SQLite database!")
-	return db
+	return db, nil
 }
