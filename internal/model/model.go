@@ -9,13 +9,13 @@ type Network string
 type TransactionStatus string
 
 const (
-	MAIN Network = "MAIN"
-	TEST Network = "TEST"
+	MAIN Network = "main"
+	TEST Network = "test"
 )
 
 const (
-	SYNCED   TransactionStatus = "SYNCED"
-	UNSYNCED TransactionStatus = "UNSYNCED"
+	SYNCED   TransactionStatus = "synced"
+	UNSYNCED TransactionStatus = "unsynced"
 )
 
 type FundingUTXO struct {
@@ -24,7 +24,7 @@ type FundingUTXO struct {
 	Vout          uint32
 	LockingScript string
 	SpentTxID     sql.NullString
-	CreatedAt time.Time
+	CreatedAt     time.Time
 }
 
 type Transaction struct {

@@ -31,3 +31,8 @@ go.work.sum
 # .idea/
 # .vscode/
 config.yaml
+.key
+Session.vim
+session.vim
+bin
+*.db

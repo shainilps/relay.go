@@ -9,11 +9,19 @@ key:
   mnemonic_path:
   password: #password in case of new key
 
-#taal
+# default_url: taal
 arc:
   token:
-  broadcast_url:
+  # provider: taal (future plan)
 
-#whatsonchain
-woc:
+# default_url: whatsonchain
+explorer:
   token:
+  # provider: whatsonchain (future plan)
+
+# try to update this manually by acc to boradcaster policy
+# example:
+# curl --location 'https://arc.taal.com/v1/policy' \
+#      --header 'Authorization: <API_KEY> | jq
+fee:
+  bytes_per_sat: 1000
