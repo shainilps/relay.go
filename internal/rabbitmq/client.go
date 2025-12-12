@@ -1,7 +1,10 @@
 package rabbitmq
 
 import (
+	"encoding/json"
+
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/shainilps/relay/internal/model"
 	"github.com/spf13/viper"
 )
 
@@ -20,12 +23,13 @@ func NewClient() (*amqp.Connection, *amqp.Channel, error) {
 	return conn, ch, nil
 }
 
-func DeclareQueue(ch *amqp.Channel) (map[QueueName](<-chan amqp.Delivery), error) {
+func DeclareQueue(ch *amqp.Channel) (map[QueueName](<-chan amqp.Delivery), map[QueueName](amqp.Queue), error) {
 
 	consumers := make(map[QueueName](<-chan amqp.Delivery))
+	queues := make(map[QueueName](amqp.Queue))
 
 	for _, queue := range Queues {
-		_, err := ch.QueueDeclare(
+		q, err := ch.QueueDeclare(
 			string(queue), // name
 			true,          // durable
 			false,         // delete when unused
@@ -34,7 +38,7 @@ func DeclareQueue(ch *amqp.Channel) (map[QueueName](<-chan amqp.Delivery), error
 			nil,           // arguments
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		msgs, err := ch.Consume(
@@ -47,25 +51,31 @@ func DeclareQueue(ch *amqp.Channel) (map[QueueName](<-chan amqp.Delivery), error
 			nil,           // args
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		consumers[queue] = msgs
+		queues[queue] = q
 	}
 
-	return consumers, nil
+	return consumers, queues, nil
 }
 
-func Publish(ch *amqp.Channel, queueName QueueName, message string) error {
+func Publish(ch *amqp.Channel, queueName QueueName, utxo *model.UTXO) error {
+
+	utxoBytes, err := json.Marshal(utxo)
+	if err != nil {
+		return err
+	}
 
 	return ch.Publish(
 		"",
 		string(queueName),
-		false,
+		true,
 		false,
 		amqp.Publishing{
-			ContentType: "text/plain",
-			Body:        []byte(message),
+			ContentType: "text/json",
+			Body:        utxoBytes,
 		},
 	)
 }

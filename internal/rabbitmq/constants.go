@@ -3,57 +3,49 @@ package rabbitmq
 type QueueName string
 
 const (
-	QUEUE_5    QueueName = "QUEUE_5"
-	QUEUE_10   QueueName = "QUEUE_10"
-	QUEUE_20   QueueName = "QUEUE_20"
-	QUEUE_40   QueueName = "QUEUE_40"
-	QUEUE_80   QueueName = "QUEUE_80"
-	QUEUE_160  QueueName = "QUEUE_160"
-	QUEUE_320  QueueName = "QUEUE_320"
-	QUEUE_640  QueueName = "QUEUE_640"
-	QUEUE_1280 QueueName = "QUEUE_1280"
-	QUEUE_2560 QueueName = "QUEUE_2560"
-	QUEUE_5120 QueueName = "QUEUE_5120"
+	QUEUE_50  QueueName = "QUEUE_50"
+	QUEUE_100 QueueName = "QUEUE_100"
+	QUEUE_200 QueueName = "QUEUE_200"
+	// QUEUE_400 QueueName = "QUEUE_400"
+	// QUEUE_800 QueueName = "QUEUE_800"
+	// QUEUE_1600  QueueName = "QUEUE_1600"
+	// QUEUE_3200  QueueName = "QUEUE_3200"
+	// QUEUE_6400  QueueName = "QUEUE_6400"
+	// QUEUE_12800 QueueName = "QUEUE_12800"
 )
 
-var ValueToQueue = map[int]QueueName{
-	5:    QUEUE_5,
-	10:   QUEUE_10,
-	20:   QUEUE_20,
-	40:   QUEUE_40,
-	80:   QUEUE_80,
-	160:  QUEUE_160,
-	320:  QUEUE_320,
-	640:  QUEUE_640,
-	1280: QUEUE_1280,
-	2560: QUEUE_2560,
-	5120: QUEUE_5120,
+var ValueToQueue = map[uint64]QueueName{
+	50:  QUEUE_50,
+	100: QUEUE_100,
+	200: QUEUE_200,
+	// 400: QUEUE_400,
+	// 800: QUEUE_800,
+	// 1600:  QUEUE_1600,
+	// 3200:  QUEUE_3200,
+	// 6400:  QUEUE_6400,
+	// 12800: QUEUE_12800,
 }
 
-var QueueToValue = map[QueueName]int{
-	QUEUE_5:    5,
-	QUEUE_10:   10,
-	QUEUE_20:   20,
-	QUEUE_40:   40,
-	QUEUE_80:   80,
-	QUEUE_160:  160,
-	QUEUE_320:  320,
-	QUEUE_640:  640,
-	QUEUE_1280: 1280,
-	QUEUE_2560: 2560,
-	QUEUE_5120: 5120,
+var QueueToValue = map[QueueName]uint64{
+	QUEUE_50:  50,
+	QUEUE_100: 100,
+	QUEUE_200: 200,
+	// QUEUE_400: 400,
+	// QUEUE_800: 800,
+	// QUEUE_1600:  1600,
+	// QUEUE_3200:  3200,
+	// QUEUE_6400:  6400,
+	// QUEUE_12800: 12800,
 }
 
 var Queues = []QueueName{
-	QUEUE_5,
-	QUEUE_10,
-	QUEUE_20,
-	QUEUE_40,
-	QUEUE_80,
-	QUEUE_160,
-	QUEUE_320,
-	QUEUE_640,
-	QUEUE_1280,
-	QUEUE_2560,
-	QUEUE_5120,
+	QUEUE_50,
+	QUEUE_100,
+	QUEUE_200,
+	// QUEUE_400,
+	// QUEUE_800,
+	// QUEUE_1600,
+	// QUEUE_3200,
+	// QUEUE_6400,
+	// QUEUE_12800,
 }

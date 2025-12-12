@@ -7,17 +7,16 @@ import (
 	"github.com/shainilps/relay/internal/model"
 )
 
-func CreateFundingUTXO(ctx context.Context, db *sql.DB, utxo *model.FundingUTXO) error {
+func CreateFundingUTXO(ctx context.Context, db *sql.DB, utxo *model.UTXO) error {
 
-	_, err := db.ExecContext(ctx, `INSERT INTO funding_utxos (utxo_id, tx_id, vout, locking_script) VALUES (?, ?, ?, ?)`)
+	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO funding_utxos (utxo_id, tx_id, vout, amount) VALUES (?, ?, ?, ?)`, utxo.UtxoID, utxo.TxID, utxo.Vout, utxo.Amount)
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 
-func CreateFundingUTXOs(ctx context.Context, db *sql.DB, utxos []model.FundingUTXO) error {
+func CreateFundingUTXOsIfNotExists(ctx context.Context, db *sql.DB, utxos []model.UTXO) error {
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -25,14 +24,14 @@ func CreateFundingUTXOs(ctx context.Context, db *sql.DB, utxos []model.FundingUT
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO funding_utxos (utxo_id, tx_id, vout, locking_script) VALUES (?, ?, ?, ?)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO funding_utxos (utxo_id, tx_id, vout, amount) VALUES (?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
 	for _, utxo := range utxos {
-		_, err := stmt.ExecContext(ctx, utxo.UtxoID, utxo.TxID, utxo.Vout, utxo.LockingScript)
+		_, err := stmt.ExecContext(ctx, utxo.UtxoID, utxo.TxID, utxo.Vout, utxo.Amount)
 		if err != nil {
 			return err
 		}
@@ -45,14 +44,14 @@ func GetAllUnspentFundingUTXOs(ctx context.Context, db *sql.DB) ([]model.UTXO, e
 
 	utxos := make([]model.UTXO, 0)
 
-	rows, err := db.QueryContext(ctx, `SELECT utxo_id, tx_id, vout, locking_script FROM funding_utxos WHERE spent_tx_id IS NULL`)
+	rows, err := db.QueryContext(ctx, `SELECT utxo_id, tx_id, vout, amount FROM funding_utxos WHERE is_spent IS FALSE`)
 	if err != nil {
 		return nil, err
 	}
 
 	for rows.Next() {
 		var utxo model.UTXO
-		err := rows.Scan(&utxo.UtxoID, &utxo.TxID, &utxo.Vout, &utxo.LockingScript)
+		err := rows.Scan(&utxo.UtxoID, &utxo.TxID, &utxo.Vout, &utxo.Amount)
 		if err != nil {
 			return nil, err
 		}
@@ -63,7 +62,7 @@ func GetAllUnspentFundingUTXOs(ctx context.Context, db *sql.DB) ([]model.UTXO, e
 	return utxos, nil
 }
 
-func MarkFundingUTXOsAsSpent(ctx context.Context, db *sql.DB, spentTxID string, utxos []model.UTXO) error {
+func MarkFundingUTXOsAsSpent(ctx context.Context, db *sql.DB, utxos []model.UTXO) error {
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -71,14 +70,14 @@ func MarkFundingUTXOsAsSpent(ctx context.Context, db *sql.DB, spentTxID string, 
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx, `UPDATE funding_utxos SET spent_tx_id = ? WHERE utxo_id = ?`)
+	stmt, err := tx.PrepareContext(ctx, `UPDATE funding_utxos SET is_spent = true WHERE utxo_id = ?`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
 	for _, utxo := range utxos {
-		_, err := stmt.ExecContext(ctx, spentTxID, utxo.UtxoID)
+		_, err := stmt.ExecContext(ctx, utxo.UtxoID)
 		if err != nil {
 			return err
 		}
@@ -101,8 +100,8 @@ func GetTransaction(ctx context.Context, db *sql.DB, txID *string) (*model.Trans
 
 	var transaction model.Transaction
 
-	row := db.QueryRowContext(ctx, `SELECT tx_id, tx_hex, height, network, status, created_at FROM transactions WHERE tx_id = ? `, txID)
-	err := row.Scan(&transaction.TxID, &transaction.TxHex, &transaction.Height, &transaction.Network, &transaction.Status, &transaction.CreatedAt)
+	row := db.QueryRowContext(ctx, `SELECT tx_id, tx_hex, height, network, status  FROM transactions WHERE tx_id = ? `, txID)
+	err := row.Scan(&transaction.TxID, &transaction.TxHex, &transaction.Height, &transaction.Network, &transaction.Status)
 	if err != nil {
 		return nil, err
 	}

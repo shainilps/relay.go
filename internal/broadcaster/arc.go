@@ -16,19 +16,19 @@ const (
 	TaalURL = "https://arc.taal.com/v1"
 )
 
-type Taal struct {
+type TaalArc struct {
 	network model.Network
 	token   string
 }
 
-func NewTaalArcProvider(network model.Network, token string) *Taal {
-	return &Taal{
+func NewTaalArcProvider(network model.Network, token string) *TaalArc {
+	return &TaalArc{
 		network,
 		token,
 	}
 }
 
-func (t *Taal) GetPolicy(ctx context.Context) (*PolicyResponse, error) {
+func (t *TaalArc) GetPolicy(ctx context.Context) (*PolicyResponse, error) {
 	url := fmt.Sprintf("%s/policy", TaalURL)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -56,7 +56,7 @@ func (t *Taal) GetPolicy(ctx context.Context) (*PolicyResponse, error) {
 	return &pr, nil
 }
 
-func (t *Taal) BroadcastTx(ctx context.Context, txHex string, headers map[string]string) (*BroadcastTxResponse, error) {
+func (t *TaalArc) BroadcastTx(ctx context.Context, txHex string, headers map[string]string) (*BroadcastTxResponse, error) {
 	url := fmt.Sprintf("%s/tx", TaalURL)
 	body := bytes.NewBufferString(txHex)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
@@ -89,7 +89,7 @@ func (t *Taal) BroadcastTx(ctx context.Context, txHex string, headers map[string
 	return &br, nil
 }
 
-func (t *Taal) GetTxStatus(ctx context.Context, txid string) (*TxStatusResponse, error) {
+func (t *TaalArc) GetTxStatus(ctx context.Context, txid string) (*TxStatusResponse, error) {
 	url := fmt.Sprintf("%s/tx/%s", TaalURL, txid)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -117,7 +117,7 @@ func (t *Taal) GetTxStatus(ctx context.Context, txid string) (*TxStatusResponse,
 	return &tr, nil
 }
 
-func (t *Taal) GetHealth(ctx context.Context) (*HealthResponse, error) {
+func (t *TaalArc) GetHealth(ctx context.Context) (*HealthResponse, error) {
 	url := fmt.Sprintf("%s/health", TaalURL)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

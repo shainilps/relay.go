@@ -1,10 +1,43 @@
-# relay
+# Relay
 
 A lightweight transaction relay service for BSV development that fund fees, and broadcasts transactions.
 
-# Project Thoughts
+# Goal
 
-- during this project time the BRC100 also kinda is becoming std in bsv ecosystem, BRC100 is one word is you make a token and you make server for indexing the token all the tx go through you (term is overlay, little more than that, but we have to see the adoption for this anyway)
-- first thing i didn't do is not adding interface for arc and broadcaster clinet because i think i wont switch broadcaster for now (we can do this later if it really required)
-  and anyway arc and broadcast is gonna replaced with overlay lookup and topic manager
-- this service can be kept between server->relay->overlay
+reducing the boring stuffs like fee hanlding, broadcasting because this is repetivive and same for every transaction
+that is why this project is made to get started withing 1 minute not more than that.
+
+Note: this project is for local development only.
+
+## Keys Info
+
+- Keys lives under the .key directory .key/wif.txt
+  automatically generated are listed as these
+  - .key/wif.txt
+  - .key/mnemonic.txt
+  - .key/address.txt
+  - .key/pubkey.txt
+
+if you want to use exising key just add the wif.txt (only wif is requried) in project root .key directory as wif.txt
+
+## How to start
+
+This project was made for absolute minimal set up.
+3(necessary)+1(optional) things just need to do is:
+
+- adding key wif.txt in the respective directory (optional due to this server will generate wif.txt if not preset and this is recommended)
+- add the arc.token in config
+- mv config.example.yaml config.yaml
+- docker compose up/podman compose up
+
+## Config (optional to read)
+
+- config will have its default port 8080, and default db test.db(sqlite), woc token is not necessary for most usecase
+- fee.sat_per_byte is 100 since nov 15 (if i remember correctly). so change it once this rule changes, till then dont touch
+- arc.token is necessary. by default it uses taal.arc so provide the token as per the app.network (test/main)
+
+## for getting the fee rate
+
+```bash
+curl --location 'https://arc.taal.com/v1/policy' | jq
+```

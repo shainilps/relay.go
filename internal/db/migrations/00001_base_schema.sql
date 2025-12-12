@@ -16,8 +16,8 @@ CREATE TABLE funding_utxos(
     utxo_id TEXT PRIMARY KEY,
     tx_id TEXT NOT NULL,  
     vout INT NOT NULL,
-    locking_script TEXT NOT NULL,
-    spent_tx_id TEXT REFERENCES transactions(tx_id),
+    amount INT NOT NULL, 
+    is_spent BOOL DEFAULT FALSE,
     created_at TEXT DEFAULT (CURRENT_TIMESTAMP)
 );
 

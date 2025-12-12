@@ -31,46 +31,53 @@ func (k *Keys) GetPublicKey() *ec.PublicKey {
 }
 
 func (k *Keys) GetAddress() (*script.Address, error) {
-	return script.NewAddressFromPublicKey(k.GetPublicKey(), viper.GetString("app.net") == "main")
+	return script.NewAddressFromPublicKey(k.GetPublicKey(), viper.GetString("app.network") == "main")
 }
 
 func Intiate() {
+	defer log.Println("keys locked and loaded!!")
 
-	if viper.GetString("key.wif_path") != "" {
-
-		privKey, err := readWifFile(viper.GetString("key.wif_path"))
+	{
+		privKey, err := readWifFile(".key/wif.txt")
 		if err != nil {
-			panic(fmt.Errorf("wif file error: %v", err))
+			goto menmonic
 		}
 
+		log.Println("loaded existing key")
 		KeyManager = &Keys{
 			privateky: privKey,
 		}
+		return
+	}
 
-	} else if viper.GetString("key.mnemonic_path") != "" {
-
-		privKey, err := readMnemonicFile(viper.GetString("key.mnemonic_path"))
+menmonic:
+	{
+		privKey, err := readMnemonicFile(".key/mnemonic.txt")
 		if err != nil {
-			panic(fmt.Errorf("mnemonic file error: %v", err))
+			log.Println(err)
+			goto generatekey
 		}
 
+		log.Println("generated key from mnemonic")
 		KeyManager = &Keys{
 			privateky: privKey,
 		}
+		return
+	}
+generatekey:
 
-	} else {
-
+	{
 		privKey, err := generateNewMasterKey()
 		if err != nil {
 			panic(fmt.Errorf("new keys error: %v", err))
 		}
 
+		log.Println("generated new keys")
 		KeyManager = &Keys{
 			privateky: privKey,
 		}
+		return
 	}
-
-	log.Println("keys locked and loaded!!")
 }
 
 func generateNewMasterKey() (*ec.PrivateKey, error) {
@@ -85,7 +92,7 @@ func generateNewMasterKey() (*ec.PrivateKey, error) {
 		return nil, err
 	}
 
-	masterSeed := bip39.NewSeed(mnemonic, viper.GetString("key.password"))
+	masterSeed := bip39.NewSeed(mnemonic, "")
 
 	masterKey, err := bip32.NewMaster(masterSeed, &transaction.MainNet)
 	if err != nil {
@@ -122,7 +129,7 @@ func saveWifAndMnemonic(privateKey *ec.PrivateKey, mnemonic string) error {
 		return fmt.Errorf("failed to save mnemonic: %w", err)
 	}
 
-	address, err := script.NewAddressFromPublicKey(privateKey.PubKey(), viper.GetString("app.net") == "main")
+	address, err := script.NewAddressFromPublicKey(privateKey.PubKey(), viper.GetString("app.network") == "main")
 	if err != nil {
 		return fmt.Errorf("failed to save address: %v", err)
 	}
