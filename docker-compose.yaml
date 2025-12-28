@@ -17,6 +17,7 @@ services:
       - "8080:8080"
     #  adjust this you changed the name
     volumes:
+      - ./key:/app/.key
       - sqlite_data:/app/database.db
     depends_on:
       - rabbitmq

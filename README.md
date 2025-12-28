@@ -1,43 +1,86 @@
 # Relay
 
-A lightweight transaction relay service for BSV development that fund fees, and broadcasts transactions.
+A lightweight transaction relay service for BSV development that funds fees and broadcasts transactions.
 
-# Goal
+## Goal
 
-reducing the boring stuffs like fee hanlding, broadcasting because this is repetivive and same for every transaction
-that is why this project is made to get started withing 1 minute not more than that.
-
-Note: this project is for local development only.
+Reduce repetitive tasks like fee handling and broadcasting, so you can get started in under a minute.
 
 ## Keys Info
 
-- Keys lives under the .key directory .key/wif.txt
-  automatically generated are listed as these
-  - .key/wif.txt
-  - .key/mnemonic.txt
-  - .key/address.txt
-  - .key/pubkey.txt
+- Keys live under the `.key` directory: `.key/wif.txt`
+- Automatically generated files:
+  - `.key/wif.txt`
+  - `.key/mnemonic.txt`
+  - `.key/address.txt`
+  - `.key/pubkey.txt`
 
-if you want to use exising key just add the wif.txt (only wif is requried) in project root .key directory as wif.txt
+> To use an existing key, just place `wif.txt` in the `.key` directory. Only WIF is required.
 
-## How to start
+---
 
-This project was made for absolute minimal set up.
-3(necessary)+1(optional) things just need to do is:
+## How to Start
 
-- adding key wif.txt in the respective directory (optional due to this server will generate wif.txt if not preset and this is recommended)
-- add the arc.token in config
-- mv config.example.yaml config.yaml
-- docker compose up/podman compose up
+Minimal setup (3 necessary + 1 optional):
 
-## Config (optional to read)
+1. Add your key `wif.txt` in the `.key` directory (optional; the server will generate one if not present).
+2. Add `arc.token` in `config.yaml` according to the network (`mainnet` or `test`).
+3. Rename the example config:
 
-- config will have its default port 8080, and default db test.db(sqlite), woc token is not necessary for most usecase
-- fee.sat_per_byte is 100 since nov 15 (if i remember correctly). so change it once this rule changes, till then dont touch
-- arc.token is necessary. by default it uses taal.arc so provide the token as per the app.network (test/main)
+   ```bash
+   mv config.example.yaml config.yaml
+   ```
 
-## for getting the fee rate
+4. Start the services using Docker or Podman:
 
-```bash
-curl --location 'https://arc.taal.com/v1/policy' | jq
-```
+   ```bash
+   docker-compose up --build
+   # or
+   podman-compose up --build
+   ```
+
+---
+
+## Configuration
+
+- **Port:** 8080 (default)
+- **Database:** SQLite (default `database.db`), persisted via Docker volume
+- **Fee rate:** `fee.sat_per_byte = 100` (as of Nov 15) — change only if policy changes
+- **Taal ARC token:** required, set in `config.yaml`
+
+> For current fee rates:
+>
+> ```bash
+> curl --location 'https://arc.taal.com/v1/policy' | jq
+> ```
+
+---
+
+## Notes on Volumes
+
+- `.key` directory is **mounted** to persist keys:
+
+  ```yaml
+  volumes:
+    - ./key:/app/.key
+  ```
+
+- SQLite database is persisted via volume:
+
+  ```yaml
+  volumes:
+    - sqlite_data:/app/database.db
+  ```
+
+- RabbitMQ data is persisted via volume:
+
+  ```yaml
+  volumes:
+    - rabbitmq_data:/var/lib/rabbitmq
+  ```
+
+> With these volumes, your keys, database, and RabbitMQ state survive container restarts.
+
+---
+
+happy hacking <3
