@@ -19,7 +19,10 @@ import (
 	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
 )
 
+const SAT_PER_KB = 100
 const DEFAULT_FUND_AMOUNT = 1
+const INPUT_SIZE = 149 // this is can be 149 also because DER singature can be 32/33
+const OUTPUT_SIZE = 34
 
 func (r *RelayService) StartEngine(ctx context.Context) {
 	address, err := keymanager.KeyManager.GetAddress()
@@ -56,9 +59,7 @@ func (r *RelayService) StartEngine(ctx context.Context) {
 		cancel()
 	}
 
-	// ingest the utxos
 	r.ingestUtxos(ctx)
-
 }
 
 func (r *RelayService) ingestUtxos(ctx context.Context) {
@@ -67,14 +68,13 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 	if err != nil {
 		log.Fatalf("critical: failed to fetch the address form the key manager: %v", err)
 	}
+
 	lockingScript, err := p2pkh.Lock(address)
 	if err != nil {
 		log.Fatalf("critical: faile to construct the lokcing script from addres: %v\n", err.Error())
 	}
 
 	for queuename := range r.fundingChan {
-
-		log.Printf("started funding the queue: %v", queuename)
 		dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		unxpentUtxos, err := repo.GetAllUnspentFundingUTXOs(dbctx, r.db)
 		if err != nil {
@@ -111,6 +111,7 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 		if fundAmount == 0 {
 			fundAmount = DEFAULT_FUND_AMOUNT
 		}
+
 		for range fundAmount {
 			tx.AddOutput(&transaction.TransactionOutput{
 				Satoshis:      rabbitmq.QueueToValue[queuename],
@@ -119,14 +120,17 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 			outputAmount += rabbitmq.QueueToValue[queuename]
 		}
 
-		//max average per input is 150
-		fee := uint64(tx.InputCount()) * 150
+		//P2PKH size calc
+		size := uint64(4 + 1 + (tx.InputCount() * INPUT_SIZE) + 1 + (tx.OutputCount() * OUTPUT_SIZE) + 4)
+		fee := uint64((size*100 + 999) / 1000) //+999 does the ceil operation for us
 		if inputAmount < (outputAmount + fee) {
 			log.Printf("critical: failed to fund %s queue due to low funding utxo balance got: %d need %d\n", queuename, inputAmount, outputAmount+fee)
 			continue
 		}
 
-		if inputAmount > outputAmount {
+		if inputAmount > (outputAmount + ((size + outputAmount*100 + 999) / 1000)) {
+			size += OUTPUT_SIZE
+			fee = uint64((size*100 + 999) / 1000)
 			tx.AddOutput(&transaction.TransactionOutput{
 				Satoshis:      (inputAmount - outputAmount - fee),
 				LockingScript: lockingScript,
@@ -135,7 +139,7 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 
 		err = tx.Sign()
 		if err != nil {
-			log.Printf("ciritcal: failed to sign transaction for fee ingest for queue %s: %v\n", queuename, err.Error())
+			log.Println("critical: failed to sign the transaction ", err.Error())
 			continue
 		}
 
@@ -161,6 +165,26 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 		}
 		cancel()
 
+		outputUtxos := make([]model.UTXO, 0, fundAmount)
+		for i, output := range tx.Outputs {
+			if i == fundAmount {
+				break
+			}
+			outputUtxos = append(outputUtxos, model.UTXO{
+				UtxoID: fmt.Sprintf("%s_%d", brodcastResponse.Txid, i),
+				TxID:   brodcastResponse.Txid,
+				Vout:   uint32(i),
+				Amount: output.Satoshis,
+			})
+		}
+
+		dbctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		err = repo.CreateFundingUTXOsIfNotExistsAndMarkAsSpent(dbctx, r.db, outputUtxos)
+		if err != nil {
+			log.Printf("critical: failed to record the chage in db  for fee transaction for queue %s:  %v", queuename, err.Error())
+		}
+		cancel()
+
 		dbctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 		if len(tx.Outputs) == fundAmount+1 {
 			output := tx.Outputs[fundAmount]
@@ -177,10 +201,11 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 		cancel()
 
 		for i, output := range tx.Outputs {
-			log.Printf("starting this %d to queuname: %v\n", i, queuename)
 			if i == fundAmount {
+				log.Println("breaking after", i)
 				break
 			}
+			log.Println("funding this:", i)
 			log.Printf("sending this %d to queuname: %v\n", i, queuename)
 
 			err := rabbitmq.Publish(r.ch, queuename, &model.UTXO{
@@ -223,25 +248,25 @@ func (r *RelayService) AddUtxo(txhex string) (string, error) {
 		return "", err
 	}
 
-	var totalFunded uint64 = 0
+	//intially we do need a utxo
+	size := tx.Size()
+	fee := uint64((size*100 + 999) / 1000)
 
-	for {
+	// we can predict the input size so we can calcuate the fund array with the fee
+	//TODO: change the logic of funding to mutliqueue
 
-		//average script size after sign is 150
-		currentFee := uint64(float64(tx.Size())*0.1) + 150
-		queuename := GetMaxQueues(currentFee)
-		log.Println("currntfee:", currentFee)
-		log.Println("currentsize:", tx.Size())
-		log.Println("queuname:", queuename)
+	queunames := CalcuateQueues(fee)
+
+	for _, queuename := range queunames {
 
 		timeout := time.After(10 * time.Second)
+
 		select {
 
 		case <-timeout:
 			return "", fmt.Errorf("timed out waiting utxo from queue %v, out of fee", queuename)
 
 		case message := <-r.consumers[queuename]:
-
 			var utxo model.UTXO
 			err = json.Unmarshal(message.Body, &utxo)
 			if err != nil {
@@ -252,20 +277,8 @@ func (r *RelayService) AddUtxo(txhex string) (string, error) {
 				return "", err
 			}
 
-			totalFunded += rabbitmq.QueueToValue[queuename]
-
-			if totalFunded >= currentFee {
-				goto jumppoint
-			}
 		}
-
-		err = tx.Sign()
-		if err != nil {
-			return "", err
-		}
-
 	}
-jumppoint:
 
 	err = tx.Sign()
 	if err != nil {
@@ -273,24 +286,6 @@ jumppoint:
 	}
 
 	return tx.EFHex()
-}
-
-func GetMaxQueues(amount uint64) rabbitmq.QueueName {
-
-	var prev = rabbitmq.Queues[0]
-	if amount < rabbitmq.QueueToValue[prev] {
-		return prev
-	}
-
-	for _, queuename := range rabbitmq.Queues {
-		if amount > rabbitmq.QueueToValue[queuename] {
-			return prev
-
-		}
-		prev = queuename
-	}
-
-	return prev
 }
 
 func (r *RelayService) StartQueueMonitor(ctx context.Context) {
@@ -316,4 +311,35 @@ func (r *RelayService) StartQueueMonitor(ctx context.Context) {
 	}
 }
 
-//approximately 150bytes per each input cost
+func CalcuateQueues(amount uint64) []rabbitmq.QueueName {
+
+	queuenames := make([]rabbitmq.QueueName, 0)
+	currentAmount := amount
+
+	for currentAmount > 0 {
+		queuename := GetBestQueue(currentAmount)
+		feeForQueue := uint64((INPUT_SIZE*100 + 999) / 1000)
+		queuenames = append(queuenames, queuename)
+		if currentAmount+feeForQueue < rabbitmq.QueueToValue[queuename] {
+			break
+		}
+		currentAmount = currentAmount + feeForQueue - rabbitmq.QueueToValue[queuename]
+	}
+
+	return queuenames
+
+}
+
+func GetBestQueue(amount uint64) rabbitmq.QueueName {
+	margin := uint64((INPUT_SIZE*100 + 999) / 1000)
+	sum := uint64(0)
+
+	for i, queuename := range rabbitmq.Queues {
+		sum += rabbitmq.QueueToValue[queuename]
+		if rabbitmq.QueueToValue[queuename]-margin >= amount || (sum-margin*uint64(i+1)) >= amount {
+			return queuename
+		}
+	}
+
+	return rabbitmq.Queues[len(rabbitmq.Queues)-1]
+}

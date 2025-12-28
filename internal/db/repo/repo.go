@@ -40,6 +40,30 @@ func CreateFundingUTXOsIfNotExists(ctx context.Context, db *sql.DB, utxos []mode
 	return tx.Commit()
 }
 
+func CreateFundingUTXOsIfNotExistsAndMarkAsSpent(ctx context.Context, db *sql.DB, utxos []model.UTXO) error {
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO funding_utxos (utxo_id, tx_id, vout, amount, is_spent) VALUES (?, ?, ?, ?, true) ON CONFLICT(utxo_id) DO UPDATE SET is_spent = true`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, utxo := range utxos {
+		_, err := stmt.ExecContext(ctx, utxo.UtxoID, utxo.TxID, utxo.Vout, utxo.Amount)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 func GetAllUnspentFundingUTXOs(ctx context.Context, db *sql.DB) ([]model.UTXO, error) {
 
 	utxos := make([]model.UTXO, 0)

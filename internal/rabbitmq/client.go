@@ -2,6 +2,7 @@ package rabbitmq
 
 import (
 	"encoding/json"
+	"log"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/shainilps/relay/internal/model"
@@ -44,7 +45,7 @@ func DeclareQueue(ch *amqp.Channel) (map[QueueName](<-chan amqp.Delivery), map[Q
 		msgs, err := ch.Consume(
 			string(queue), // queue
 			"",            // consumer
-			true,          // auto-ack
+			false,         // auto-ack
 			false,         // exclusive
 			false,         // no-local
 			false,         // no-wait
@@ -68,14 +69,16 @@ func Publish(ch *amqp.Channel, queueName QueueName, utxo *model.UTXO) error {
 		return err
 	}
 
+	log.Printf("publish to %v queue and the utxo model: %+v", queueName, utxo)
 	return ch.Publish(
 		"",
 		string(queueName),
 		true,
 		false,
 		amqp.Publishing{
-			ContentType: "text/json",
-			Body:        utxoBytes,
+			ContentType:  "text/json",
+			Body:         utxoBytes,
+			DeliveryMode: amqp.Persistent,
 		},
 	)
 }

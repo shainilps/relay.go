@@ -26,6 +26,7 @@ func init() {
 }
 
 func main() {
+
 	db, err := db.NewClient()
 	if err != nil {
 		log.Fatalf("failed to create db client: %v", err)
@@ -41,15 +42,13 @@ func main() {
 		log.Fatalf("failed to create queues and consumers: %v", err)
 	}
 
-	appctx, cancel := context.WithCancel(context.Background())
-
-	broadcaster := broadcaster.NewBroadcaster()
-	// 13Ny8SNCEHrTunpn7ZzGqMS4RAPoXvJXnx
+	bd := broadcaster.NewBroadcaster()
 
 	fundingChan := make(chan rabbitmq.QueueName)
 
-	service := services.NewRelayService(db, ch, broadcaster, consumers, queues, fundingChan)
+	service := services.NewRelayService(db, ch, bd, consumers, queues, fundingChan)
 
+	appctx, cancel := context.WithCancel(context.Background())
 	go service.StartEngine(appctx)
 	go service.StartQueueMonitor(appctx)
 
