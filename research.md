@@ -56,9 +56,13 @@ why 25 ?
 
 # conclusion
 
-- we can consider the varint only `1` becuase we wont add more than 256 input or 256 output eithers (in our case)
+- we can consider the varint only `1` becuase we wont add more than 252 input or 252 output eithers (in our case)
 
 now i think we can guess the input and output size correctly(through proper math(almost accurate))
 
 one input cost = 32+4+1+(106-108)+4 = 147-149 (we will consider lowerbound)
 one output cost = 8+1+25 = 34 bytes
+
+NOTE:
+if the input count exceed 252 varint will become 3 bytes. this can be considered max (65535) like nobody gonna add
+65k input or output though
