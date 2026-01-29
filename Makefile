@@ -1,7 +1,7 @@
 BINARY_NAME = relay
 
 build:
-	CGO_ENABLED=0 go build -ldflags='-w -s -extldflags='-static'' -o bin/$(BINARY_NAME) .
+	CGO_ENABLED=1 go build -ldflags='-w -s' -o bin/$(BINARY_NAME) .
 
 clean: 
 	rm -rf bin
