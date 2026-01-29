@@ -15,10 +15,9 @@ services:
     restart: always
     ports:
       - "8080:8080"
-    #  adjust this you changed the name
     volumes:
-      - ./key:/app/.key
-      - sqlite_data:/app/database.db
+      - ./.key:/app/.key
+      - sqlite_data:/app/data
     depends_on:
       - rabbitmq
 

@@ -5,7 +5,7 @@ A lightweight transaction relay service for BSV development that funds fees and 
 ## Improvements
 
 - [ ] regular fee handling without queue for quick testing
-- [ ] docker compose have some issue (with key being duplicated)
+- [x] docker compose have some issue (with key being duplicated)
 - [ ] make a file upload endpoint so that anyone can just upload file
 - [ ] make a text upload endpoint so that anyone can just upload file (optional)
 

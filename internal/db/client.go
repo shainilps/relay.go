@@ -10,7 +10,7 @@ import (
 func NewClient() (*sql.DB, error) {
 
 	//default
-	path := "./database.db"
+	path := "./data/database.db"
 
 	if viper.GetString("db.path") != "" {
 		path = viper.GetString("db.path")

@@ -6,8 +6,8 @@ CREATE TABLE transactions(
     tx_id TEXT PRIMARY KEY,
     tx_hex TEXT NOT NULL,
     height BIGINT DEFAULT 0,
-    network TEXT NOT NULL CHECK(network IN ('MAIN', 'TEST')),
-    status TEXT DEFAULT 'UNSYNCED' CHECK (status IN ('UNSYNCED','SYNCED')),
+    network TEXT NOT NULL CHECK(network IN ('main', 'test')),
+    status TEXT DEFAULT 'UNSYNCED' CHECK (status IN ('unsynced','synced')),
     created_at TEXT DEFAULT (CURRENT_TIMESTAMP)
 );
 

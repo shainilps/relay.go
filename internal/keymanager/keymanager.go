@@ -114,9 +114,17 @@ func generateNewMasterKey() (*ec.PrivateKey, error) {
 
 func saveWifAndMnemonic(privateKey *ec.PrivateKey, mnemonic string) error {
 
-	err := os.Mkdir(".key", 0700)
-	if err != nil {
-		return fmt.Errorf("failed to create .key dir: %v \n Try to set the config wif path to .key/wif.txt", err)
+	info, err := os.Stat(".key")
+	if err == nil {
+		if !info.IsDir() {
+			if err := os.Remove(".key"); err != nil {
+				return fmt.Errorf("failed to remove .key file: %v", err)
+			}
+		}
+	}
+
+	if err := os.MkdirAll(".key", 0700); err != nil {
+		return fmt.Errorf("failed to create .key dir: %v", err)
 	}
 
 	err = os.WriteFile(".key/wif.txt", []byte(privateKey.Wif()), 0600)

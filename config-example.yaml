@@ -1,0 +1,22 @@
+#(necessary)
+app:
+  network: main # main/test
+  addr: :8080
+
+#taal(necessary)
+arc:
+  token:
+
+#whatsonchain(optional)
+woc:
+  token:
+
+rabbitmq:
+  # url: amqp://guest:guest@localhost:5672/ (for local)
+  url: amqp://guest:guest@rabbitmq:5672/
+
+db:
+  path: #sqlite db path (optional) default: ./data/database.db (docker compose expect the db to be presen in the data dir)
+
+#default 1
+fund_amount: 1
