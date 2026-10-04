@@ -1,17 +1,12 @@
 # Relay
 
-A lightweight transaction relay service for BSV development that funds fees and broadcasts transactions.
-
-## Improvements
-
-- [ ] regular fee handling without queue for quick testing
-- [x] docker compose have some issue (with key being duplicated)
-- [ ] make a file upload endpoint so that anyone can just upload file
-- [ ] make a text upload endpoint so that anyone can just upload file (optional)
+A lightweight transaction relay service for BSV development that funds fees and broadcasts
+transactions.
 
 ## Goal
 
-Reduce repetitive tasks like fee handling and broadcasting, so you can get started in under a minute.
+Reduce repetitive tasks like fee handling and broadcasting, so you can get started in under a
+minute.
 
 ## Keys Info
 
@@ -30,7 +25,8 @@ Reduce repetitive tasks like fee handling and broadcasting, so you can get start
 
 Minimal setup (3 necessary + 1 optional):
 
-1. Add your key `wif.txt` in the `.key` directory (optional; the server will generate one if not present).
+1. Add your key `wif.txt` in the `.key` directory (optional; the server will generate one if not
+   present).
 2. Add `arc.token` in `config.yaml` according to the network (`mainnet` or `test`).
 3. Rename the example config:
 

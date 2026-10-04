@@ -9,6 +9,16 @@ services:
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
 
+  migrate:
+    image: ghcr.io/kukymbr/goose-docker:3.28.0
+    container_name: relay-migrate
+    environment:
+      GOOSE_DRIVER: sqlite3
+      GOOSE_DBSTRING: /app/data/database.db
+    volumes:
+      - ./internal/db/migrations:/migrations:ro
+      - sqlite_data:/app/data
+
   app:
     build: .
     container_name: relay-app
@@ -19,7 +29,10 @@ services:
       - ./.key:/app/.key
       - sqlite_data:/app/data
     depends_on:
-      - rabbitmq
+      rabbitmq:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   rabbitmq_data:
