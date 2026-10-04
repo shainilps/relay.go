@@ -4,13 +4,13 @@ type Network string
 type TransactionStatus string
 
 const (
-	MAIN Network = "main"
-	TEST Network = "test"
+	MAIN Network = "MAIN"
+	TEST Network = "TEST"
 )
 
 const (
-	SYNCED   TransactionStatus = "synced"
-	UNSYNCED TransactionStatus = "unsynced"
+	SYNCED   TransactionStatus = "SYNCED"
+	UNSYNCED TransactionStatus = "UNSYNCED"
 )
 
 type UTXO struct {

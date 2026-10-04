@@ -12,24 +12,30 @@ import (
 	"github.com/shainilps/relay/internal/model"
 )
 
-const (
-	TaalURL = "https://arc.taal.com/v1"
-)
-
 type TaalArc struct {
-	network model.Network
 	token   string
+	taalUrl string
 }
 
+const (
+	TaalMainURL = "https://arc.taal.com/v1"
+	TaalTestURL = "https://arc-test.taal.com/v1"
+)
+
 func NewTaalArcProvider(network model.Network, token string) *TaalArc {
+	taalUrl := TaalMainURL
+	if network == model.TEST {
+		taalUrl = TaalTestURL
+	}
+
 	return &TaalArc{
-		network,
 		token,
+		taalUrl,
 	}
 }
 
 func (t *TaalArc) GetPolicy(ctx context.Context) (*PolicyResponse, error) {
-	url := fmt.Sprintf("%s/policy", TaalURL)
+	url := fmt.Sprintf("%s/policy", t.taalUrl)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -57,7 +63,7 @@ func (t *TaalArc) GetPolicy(ctx context.Context) (*PolicyResponse, error) {
 }
 
 func (t *TaalArc) BroadcastTx(ctx context.Context, txHex string, headers map[string]string) (*BroadcastTxResponse, error) {
-	url := fmt.Sprintf("%s/tx", TaalURL)
+	url := fmt.Sprintf("%s/tx", t.taalUrl)
 	body := bytes.NewBufferString(txHex)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
 	if err != nil {
@@ -90,7 +96,7 @@ func (t *TaalArc) BroadcastTx(ctx context.Context, txHex string, headers map[str
 }
 
 func (t *TaalArc) GetTxStatus(ctx context.Context, txid string) (*TxStatusResponse, error) {
-	url := fmt.Sprintf("%s/tx/%s", TaalURL, txid)
+	url := fmt.Sprintf("%s/tx/%s", t.taalUrl, txid)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -118,7 +124,7 @@ func (t *TaalArc) GetTxStatus(ctx context.Context, txid string) (*TxStatusRespon
 }
 
 func (t *TaalArc) GetHealth(ctx context.Context) (*HealthResponse, error) {
-	url := fmt.Sprintf("%s/health", TaalURL)
+	url := fmt.Sprintf("%s/health", t.taalUrl)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err

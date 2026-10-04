@@ -1,6 +1,6 @@
 #(necessary)
 app:
-  network: main # main/test
+  network: MAIN # MAIN/TEST
   addr: :8080
 
 #taal(necessary)

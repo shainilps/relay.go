@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	bip32 "github.com/bsv-blockchain/go-sdk/compat/bip32"
 	bip39 "github.com/bsv-blockchain/go-sdk/compat/bip39"
@@ -162,7 +163,7 @@ func readWifFile(path string) (*ec.PrivateKey, error) {
 		return nil, fmt.Errorf("failed to read WIF file: %w", err)
 	}
 
-	return ec.PrivateKeyFromWif(string(wif))
+	return ec.PrivateKeyFromWif(strings.TrimSpace(string(wif)))
 }
 
 func readMnemonicFile(path string) (*ec.PrivateKey, error) {
@@ -172,7 +173,7 @@ func readMnemonicFile(path string) (*ec.PrivateKey, error) {
 		return nil, fmt.Errorf("failed to read WIF file: %w", err)
 	}
 
-	masterSeed := bip39.NewSeed(string(mnemonicBytes), viper.GetString("key.password"))
+	masterSeed := bip39.NewSeed(strings.TrimSpace(string(mnemonicBytes)), viper.GetString("key.password"))
 
 	masterKey, err := bip32.NewMaster(masterSeed, &transaction.MainNet)
 	if err != nil {
