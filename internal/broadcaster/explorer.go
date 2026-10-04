@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/shainilps/relay/internal/model"
@@ -34,7 +35,7 @@ func (w *WOCExplorer) GetUtxosForAddress(ctx context.Context, address string) (*
 	}
 
 	// GET https://api.whatsonchain.com/v1/bsv/<network>/address/<address>/unspent/all
-	url := fmt.Sprintf("%s/%s/address/%s/unspent/all", WOCURL, w.network, address)
+	url := fmt.Sprintf("%s/%s/address/%s/unspent/all", WOCURL, strings.ToLower(string(w.network)), address)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
