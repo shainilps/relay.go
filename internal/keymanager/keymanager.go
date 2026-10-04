@@ -32,7 +32,7 @@ func (k *Keys) GetPublicKey() *ec.PublicKey {
 }
 
 func (k *Keys) GetAddress() (*script.Address, error) {
-	return script.NewAddressFromPublicKey(k.GetPublicKey(), viper.GetString("app.network") == "main")
+	return script.NewAddressFromPublicKey(k.GetPublicKey(), viper.GetString("app.network") == "MAIN")
 }
 
 func Intiate() {
@@ -138,7 +138,7 @@ func saveWifAndMnemonic(privateKey *ec.PrivateKey, mnemonic string) error {
 		return fmt.Errorf("failed to save mnemonic: %w", err)
 	}
 
-	address, err := script.NewAddressFromPublicKey(privateKey.PubKey(), viper.GetString("app.network") == "main")
+	address, err := script.NewAddressFromPublicKey(privateKey.PubKey(), viper.GetString("app.network") == "MAIN")
 	if err != nil {
 		return fmt.Errorf("failed to save address: %v", err)
 	}
