@@ -14,12 +14,14 @@ woc:
 rabbitmq:
   # url: amqp://guest:guest@localhost:5672/ (for local)
   url: amqp://guest:guest@rabbitmq:5672/
+  prefetch: 50
 
 db:
-  path: #sqlite db path (optional) default: ./data/database.db (docker compose expect the db to be presen in the data dir)
+  url: postgres://relay:relay@postgres:5432/relay?sslmode=disable
 
 #default 1
 fund_amount: 1
+funding_scan_interval: 5m
 
 sync:
   max_attempts: 5

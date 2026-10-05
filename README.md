@@ -47,7 +47,7 @@ Minimal setup (3 necessary + 1 optional):
 ## Configuration
 
 - **Port:** 8080 (default)
-- **Database:** SQLite (default `database.db`), persisted via Docker volume
+- **Database:** PostgreSQL (`db.url`), persisted via Docker volume
 - **Fee rate:** `fee.sat_per_byte = 100` (as of Nov 15) — change only if policy changes
 - **Taal ARC token:** required, set in `config.yaml`
 
@@ -68,11 +68,11 @@ Minimal setup (3 necessary + 1 optional):
     - ./key:/app/.key
   ```
 
-- SQLite database is persisted via volume:
+- PostgreSQL data is persisted via volume:
 
   ```yaml
   volumes:
-    - sqlite_data:/app/database.db
+    - postgres_data:/var/lib/postgresql/data
   ```
 
 - RabbitMQ data is persisted via volume:

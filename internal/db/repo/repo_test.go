@@ -4,44 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/shainilps/relay/internal/db/dbtest"
 	"github.com/shainilps/relay/internal/model"
 )
 
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
-
-	files, err := filepath.Glob("../migrations/*.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, file := range files {
-		content, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		up, _, _ := strings.Cut(string(content), "-- +goose Down")
-		if _, err := db.Exec(up); err != nil {
-			t.Fatalf("migration %s: %v", file, err)
-		}
-	}
-	return db
-}
-
 func TestTransactionLifecycle(t *testing.T) {
 	ctx := context.Background()
-	db := newTestDB(t)
+	db := dbtest.New(t)
 
 	tx := &model.Transaction{TxID: "tx1", TxHex: "00", Network: model.TEST, NextAttemptAt: 100}
 	if err := CreateTransaction(ctx, db, tx, nil); err != nil {
@@ -109,7 +80,7 @@ func TestTransactionLifecycle(t *testing.T) {
 
 func TestMarkFailed(t *testing.T) {
 	ctx := context.Background()
-	db := newTestDB(t)
+	db := dbtest.New(t)
 
 	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "tx1", TxHex: "00", Network: model.MAIN}, nil); err != nil {
 		t.Fatal(err)
@@ -128,7 +99,7 @@ func TestMarkFailed(t *testing.T) {
 
 func TestRecordUnreachable(t *testing.T) {
 	ctx := context.Background()
-	db := newTestDB(t)
+	db := dbtest.New(t)
 
 	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "tx1", TxHex: "00", Network: model.MAIN, NextAttemptAt: 500}, nil); err != nil {
 		t.Fatal(err)
@@ -147,7 +118,7 @@ func TestRecordUnreachable(t *testing.T) {
 
 func TestDoubleSpend(t *testing.T) {
 	ctx := context.Background()
-	db := newTestDB(t)
+	db := dbtest.New(t)
 
 	parentOutput := model.Outpoint{TxID: "parent", Vout: 0}
 	otherOutput := model.Outpoint{TxID: "parent", Vout: 1}
@@ -192,7 +163,7 @@ func TestDoubleSpend(t *testing.T) {
 
 func TestGetSpendingTransaction(t *testing.T) {
 	ctx := context.Background()
-	db := newTestDB(t)
+	db := dbtest.New(t)
 
 	feeUtxo := model.Outpoint{TxID: "funding", Vout: 3}
 
@@ -229,7 +200,7 @@ func TestGetSpendingTransaction(t *testing.T) {
 
 func TestStoreFundingTransaction(t *testing.T) {
 	ctx := context.Background()
-	db := newTestDB(t)
+	db := dbtest.New(t)
 
 	fundingInput := model.UTXO{UtxoID: "old_0", TxID: "old", Vout: 0, Amount: 10000}
 	if err := CreateFundingUTXOsIfNotExists(ctx, db, []model.UTXO{fundingInput}); err != nil {
@@ -293,7 +264,7 @@ func TestStoreFundingTransaction(t *testing.T) {
 
 func TestStoreFundingTransactionRollsBackOnDoubleSpend(t *testing.T) {
 	ctx := context.Background()
-	db := newTestDB(t)
+	db := dbtest.New(t)
 
 	fundingInput := model.UTXO{UtxoID: "old_0", TxID: "old", Vout: 0, Amount: 10000}
 	if err := CreateFundingUTXOsIfNotExists(ctx, db, []model.UTXO{fundingInput}); err != nil {

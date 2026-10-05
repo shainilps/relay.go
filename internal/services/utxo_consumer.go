@@ -24,47 +24,77 @@ import (
 const SAT_PER_KB = 100
 const DEFAULT_FUND_AMOUNT = 1
 const FUNDING_RETRY_INTERVAL = 30 * time.Second
+const DEFAULT_FUNDING_SCAN_INTERVAL = 5 * time.Minute
 const INPUT_SIZE = 149 // this is can be 149 also because DER singature can be 32/33
 const OUTPUT_SIZE = 34
 
 var MIN_CHANGE = feeForSize(INPUT_SIZE)
 
 func (r *RelayService) StartEngine(ctx context.Context) {
+	r.syncFundingUtxos(ctx)
+	go r.scanFundingUtxos(ctx)
+	r.ingestUtxos(ctx)
+}
+
+func fundingScanInterval() time.Duration {
+	interval := viper.GetDuration("funding_scan_interval")
+	if interval <= 0 {
+		interval = DEFAULT_FUNDING_SCAN_INTERVAL
+	}
+	return interval
+}
+
+func (r *RelayService) scanFundingUtxos(ctx context.Context) {
+	ticker := time.NewTicker(fundingScanInterval())
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.syncFundingUtxos(ctx)
+			r.signalFunding()
+		}
+	}
+}
+
+func (r *RelayService) syncFundingUtxos(ctx context.Context) {
 	address, err := keymanager.KeyManager.GetAddress()
 	if err != nil {
-		log.Fatalf("failed to fetch address from key manager %v", err.Error())
+		log.Printf("critical: failed to fetch funding address from key manager: %v\n", err)
+		return
 	}
 
 	reqctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	log.Println("address being from utxo: ", address.AddressString)
 	utxosets, err := r.broadcaster.Explorer.GetUtxosForAddress(reqctx, address.AddressString)
-	if err != nil {
-		log.Printf("warning: failed to get the any funding utxo: %v\n", err.Error())
-	}
 	cancel()
-	if utxosets != nil && len(utxosets.Result) != 0 {
-		fundingUtxo := make([]model.UTXO, 0, len(utxosets.Result))
-		for _, utxo := range utxosets.Result {
-			if !utxo.IsSpentInMempoolTx {
-				fundingUtxo = append(fundingUtxo, model.UTXO{
-					UtxoID: fmt.Sprintf("%s_%d", utxo.TxHash, utxo.TxPos),
-					Amount: utxo.Value,
-					TxID:   utxo.TxHash,
-					Vout:   utxo.TxPos,
-				})
-			}
-		}
-
-		log.Println("funding utxo: ", fundingUtxo)
-		dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err = repo.CreateFundingUTXOsIfNotExists(dbctx, r.db, fundingUtxo)
-		if err != nil {
-			log.Printf("warning: failed to insert utxo records on db: %v\n", err.Error())
-		}
-		cancel()
+	if err != nil {
+		log.Printf("warning: failed to fetch funding utxos for %s: %v\n", address.AddressString, err)
+		return
 	}
 
-	r.ingestUtxos(ctx)
+	fundingUtxo := make([]model.UTXO, 0, len(utxosets.Result))
+	for _, utxo := range utxosets.Result {
+		if !utxo.IsSpentInMempoolTx {
+			fundingUtxo = append(fundingUtxo, model.UTXO{
+				UtxoID: fmt.Sprintf("%s_%d", utxo.TxHash, utxo.TxPos),
+				Amount: utxo.Value,
+				TxID:   utxo.TxHash,
+				Vout:   utxo.TxPos,
+			})
+		}
+	}
+	if len(fundingUtxo) == 0 {
+		return
+	}
+
+	dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	err = repo.CreateFundingUTXOsIfNotExists(dbctx, r.db, fundingUtxo)
+	cancel()
+	if err != nil {
+		log.Printf("warning: failed to insert funding utxos: %v\n", err)
+	}
 }
 
 func fundTarget() int {
@@ -105,9 +135,19 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 		log.Fatalf("critical: failed to fetch the address form the key manager: %v", err)
 	}
 
-	lockingScript, err := p2pkh.Lock(address)
+	fundingLockingScript, err := p2pkh.Lock(address)
 	if err != nil {
 		log.Fatalf("critical: faile to construct the lokcing script from addres: %v\n", err.Error())
+	}
+
+	feeAddress, err := keymanager.KeyManager.GetFeeAddress()
+	if err != nil {
+		log.Fatalf("critical: failed to fetch the fee address form the key manager: %v", err)
+	}
+
+	feeLockingScript, err := p2pkh.Lock(feeAddress)
+	if err != nil {
+		log.Fatalf("critical: failed to construct the fee locking script: %v\n", err)
 	}
 
 	dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -123,7 +163,7 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 
 	target := fundTarget()
 	startup := make(map[rabbitmq.QueueName]int)
-	for queuename, queue := range r.queues {
+	for queuename, queue := range r.mq.Queues() {
 		if missing := target - queue.Messages - pending[queuename]; missing > 0 {
 			startup[queuename] = missing
 		}
@@ -149,7 +189,7 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 
 		deficit := r.takeDeficit()
 		if len(deficit) > 0 {
-			unfunded := r.fundQueues(ctx, deficit, lockingScript)
+			unfunded := r.fundQueues(ctx, deficit, fundingLockingScript, feeLockingScript)
 			if len(unfunded) > 0 {
 				r.recordDeficit(unfunded)
 				retry = time.After(FUNDING_RETRY_INTERVAL)
@@ -195,7 +235,7 @@ func planChange(inputAmount uint64, outputAmount uint64, inputCount int, outputC
 	return inputAmount - outputAmount - feeWithChange, feeWithChange, true
 }
 
-func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.QueueName]int, lockingScript *script.Script) map[rabbitmq.QueueName]int {
+func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.QueueName]int, fundingLockingScript *script.Script, feeLockingScript *script.Script) map[rabbitmq.QueueName]int {
 
 	dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	unxpentUtxos, err := repo.GetAllUnspentFundingUTXOs(dbctx, r.db)
@@ -221,7 +261,7 @@ func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.Queu
 
 	var inputAmount uint64
 	for _, utxo := range unxpentUtxos {
-		err = tx.AddInputFrom(utxo.TxID, utxo.Vout, hex.EncodeToString(lockingScript.Bytes()), utxo.Amount, unlockingTemplate)
+		err = tx.AddInputFrom(utxo.TxID, utxo.Vout, hex.EncodeToString(fundingLockingScript.Bytes()), utxo.Amount, unlockingTemplate)
 		if err != nil {
 			log.Printf("critical: failed to add utxo to transaction: %v\n", err.Error())
 		}
@@ -234,7 +274,7 @@ func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.Queu
 		for range deficit[queuename] {
 			tx.AddOutput(&transaction.TransactionOutput{
 				Satoshis:      rabbitmq.QueueToValue[queuename],
-				LockingScript: lockingScript,
+				LockingScript: feeLockingScript,
 			})
 			outputAmount += rabbitmq.QueueToValue[queuename]
 			outputQueues = append(outputQueues, queuename)
@@ -251,7 +291,7 @@ func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.Queu
 	if change > 0 {
 		tx.AddOutput(&transaction.TransactionOutput{
 			Satoshis:      change,
-			LockingScript: lockingScript,
+			LockingScript: fundingLockingScript,
 		})
 	}
 
@@ -339,7 +379,7 @@ func (r *RelayService) publishPending(ctx context.Context) bool {
 
 	for _, utxo := range pending {
 		publishctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := rabbitmq.Publish(publishctx, r.ch, rabbitmq.QueueName(utxo.Queue), &utxo.UTXO)
+		err := r.mq.Publish(publishctx, rabbitmq.QueueName(utxo.Queue), &utxo.UTXO)
 		cancel()
 		if err != nil {
 			log.Printf("critical: failed to publish utxo %s to queue %s: %v\n", utxo.UtxoID, utxo.Queue, err)
@@ -360,7 +400,7 @@ func (r *RelayService) publishPending(ctx context.Context) bool {
 
 func (r *RelayService) AddUtxo(ctx context.Context, tx *transaction.Transaction) ([]amqp.Delivery, error) {
 
-	address, err := keymanager.KeyManager.GetAddress()
+	address, err := keymanager.KeyManager.GetFeeAddress()
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +411,7 @@ func (r *RelayService) AddUtxo(ctx context.Context, tx *transaction.Transaction)
 	lockingScriptStr := hex.EncodeToString(lockingScript.Bytes())
 
 	sgh := sighash.All | sighash.AnyOneCanPay | sighash.ForkID
-	unlockingTemplate, err := p2pkh.Unlock(keymanager.KeyManager.GetPrivateKey(), &sgh)
+	unlockingTemplate, err := p2pkh.Unlock(keymanager.KeyManager.GetFeePrivateKey(), &sgh)
 	if err != nil {
 		return nil, err
 	}
@@ -420,10 +460,7 @@ func (r *RelayService) takeUtxo(ctx context.Context, queuename rabbitmq.QueueNam
 		case <-timeout:
 			return amqp.Delivery{}, model.UTXO{}, fmt.Errorf("%w: timed out waiting utxo from queue %v", ErrOutOfFee, queuename)
 
-		case message, ok := <-r.consumers[queuename]:
-			if !ok {
-				return amqp.Delivery{}, model.UTXO{}, fmt.Errorf("consumer for queue %v is closed", queuename)
-			}
+		case message := <-r.mq.Deliveries(queuename):
 
 			var utxo model.UTXO
 			err := json.Unmarshal(message.Body, &utxo)

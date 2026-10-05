@@ -18,25 +18,27 @@ import (
 	"github.com/spf13/viper"
 )
 
+type UtxoQueue interface {
+	Deliveries(queue rabbitmq.QueueName) <-chan amqp.Delivery
+	Queues() map[rabbitmq.QueueName]amqp.Queue
+	Publish(ctx context.Context, queue rabbitmq.QueueName, utxo *model.UTXO) error
+}
+
 type RelayService struct {
-	ch          *amqp.Channel
 	db          *sql.DB
 	broadcaster *broadcaster.Broadcaster
-	consumers   map[rabbitmq.QueueName]<-chan amqp.Delivery
-	queues      map[rabbitmq.QueueName]amqp.Queue
+	mq          UtxoQueue
 	fundingChan chan struct{}
 	deficitMu   sync.Mutex
 	deficit     map[rabbitmq.QueueName]int
 	syncConfig  SyncConfig
 }
 
-func NewRelayService(db *sql.DB, ch *amqp.Channel, broadcaster *broadcaster.Broadcaster, consumers map[rabbitmq.QueueName]<-chan amqp.Delivery, queues map[rabbitmq.QueueName]amqp.Queue) *RelayService {
+func NewRelayService(db *sql.DB, broadcaster *broadcaster.Broadcaster, mq UtxoQueue) *RelayService {
 	return &RelayService{
-		ch:          ch,
 		db:          db,
 		broadcaster: broadcaster,
-		consumers:   consumers,
-		queues:      queues,
+		mq:          mq,
 		fundingChan: make(chan struct{}, 1),
 		deficit:     make(map[rabbitmq.QueueName]int),
 		syncConfig:  LoadSyncConfig(),

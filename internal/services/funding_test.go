@@ -2,16 +2,12 @@ package services
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/shainilps/relay/internal/db/dbtest"
 	"github.com/shainilps/relay/internal/db/repo"
 	"github.com/shainilps/relay/internal/model"
 	"github.com/shainilps/relay/internal/rabbitmq"
@@ -36,8 +32,24 @@ func (f *fakeAcknowledger) Reject(tag uint64, requeue bool) error {
 	return nil
 }
 
+type fakeQueue struct {
+	deliveries map[rabbitmq.QueueName]chan amqp.Delivery
+}
+
+func (f *fakeQueue) Deliveries(queue rabbitmq.QueueName) <-chan amqp.Delivery {
+	return f.deliveries[queue]
+}
+
+func (f *fakeQueue) Queues() map[rabbitmq.QueueName]amqp.Queue {
+	return nil
+}
+
+func (f *fakeQueue) Publish(ctx context.Context, queue rabbitmq.QueueName, utxo *model.UTXO) error {
+	return nil
+}
+
 func newFundingTestService() *RelayService {
-	return NewRelayService(nil, nil, nil, nil, nil)
+	return NewRelayService(nil, nil, &fakeQueue{})
 }
 
 func TestAckDeliveriesRecordsDeficit(t *testing.T) {
@@ -95,32 +107,6 @@ func TestAckDeliveriesWithNothingAckedDoesNotSignal(t *testing.T) {
 	}
 }
 
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
-
-	files, err := filepath.Glob("../db/migrations/*.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, file := range files {
-		content, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		up, _, _ := strings.Cut(string(content), "-- +goose Down")
-		if _, err := db.Exec(up); err != nil {
-			t.Fatalf("migration %s: %v", file, err)
-		}
-	}
-	return db
-}
-
 type recordingAcknowledger struct {
 	acked  []uint64
 	nacked []uint64
@@ -151,7 +137,7 @@ func utxoDelivery(t *testing.T, acknowledger amqp.Acknowledger, tag uint64, rede
 
 func TestTakeUtxoDropsSpentUtxo(t *testing.T) {
 	ctx := context.Background()
-	db := newTestDB(t)
+	db := dbtest.New(t)
 
 	spent := model.UTXO{UtxoID: "funding_0", TxID: "funding", Vout: 0, Amount: 50}
 	unspentRedelivered := model.UTXO{UtxoID: "funding_1", TxID: "funding", Vout: 1, Amount: 50}
@@ -165,7 +151,7 @@ func TestTakeUtxoDropsSpentUtxo(t *testing.T) {
 	queue <- utxoDelivery(t, acknowledger, 1, false, spent)
 	queue <- utxoDelivery(t, acknowledger, 2, true, unspentRedelivered)
 
-	r := NewRelayService(db, nil, nil, map[rabbitmq.QueueName]<-chan amqp.Delivery{rabbitmq.QUEUE_50: queue}, nil)
+	r := NewRelayService(db, nil, &fakeQueue{deliveries: map[rabbitmq.QueueName]chan amqp.Delivery{rabbitmq.QUEUE_50: queue}})
 
 	message, utxo, err := r.takeUtxo(ctx, rabbitmq.QUEUE_50)
 	if err != nil {

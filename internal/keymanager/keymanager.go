@@ -15,12 +15,29 @@ import (
 	"github.com/spf13/viper"
 )
 
-// not planning to maintain mutliple address to be honest for now :)
+const FEE_KEY_INVOICE = "relay fee utxos"
 
 var KeyManager *Keys
 
 type Keys struct {
 	privateky *ec.PrivateKey
+	feeKey    *ec.PrivateKey
+}
+
+func newKeys(privateKey *ec.PrivateKey) *Keys {
+	feeKey, err := deriveFeeKey(privateKey)
+	if err != nil {
+		panic(fmt.Errorf("fee key derivation error: %v", err))
+	}
+	return &Keys{privateky: privateKey, feeKey: feeKey}
+}
+
+func deriveFeeKey(privateKey *ec.PrivateKey) (*ec.PrivateKey, error) {
+	return privateKey.DeriveChild(privateKey.PubKey(), FEE_KEY_INVOICE)
+}
+
+func addressOf(privateKey *ec.PrivateKey) (*script.Address, error) {
+	return script.NewAddressFromPublicKey(privateKey.PubKey(), viper.GetString("app.network") == "MAIN")
 }
 
 func (k *Keys) GetPrivateKey() *ec.PrivateKey {
@@ -32,7 +49,15 @@ func (k *Keys) GetPublicKey() *ec.PublicKey {
 }
 
 func (k *Keys) GetAddress() (*script.Address, error) {
-	return script.NewAddressFromPublicKey(k.GetPublicKey(), viper.GetString("app.network") == "MAIN")
+	return addressOf(k.privateky)
+}
+
+func (k *Keys) GetFeePrivateKey() *ec.PrivateKey {
+	return k.feeKey
+}
+
+func (k *Keys) GetFeeAddress() (*script.Address, error) {
+	return addressOf(k.feeKey)
 }
 
 func Intiate() {
@@ -45,9 +70,7 @@ func Intiate() {
 		}
 
 		log.Println("loaded existing key")
-		KeyManager = &Keys{
-			privateky: privKey,
-		}
+		KeyManager = newKeys(privKey)
 		return
 	}
 
@@ -60,9 +83,7 @@ menmonic:
 		}
 
 		log.Println("generated key from mnemonic")
-		KeyManager = &Keys{
-			privateky: privKey,
-		}
+		KeyManager = newKeys(privKey)
 		return
 	}
 generatekey:
@@ -74,9 +95,7 @@ generatekey:
 		}
 
 		log.Println("generated new keys")
-		KeyManager = &Keys{
-			privateky: privKey,
-		}
+		KeyManager = newKeys(privKey)
 		return
 	}
 }

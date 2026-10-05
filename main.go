@@ -32,21 +32,17 @@ func main() {
 		log.Fatalf("failed to create db client: %v", err)
 	}
 
-	_, ch, err := rabbitmq.NewClient()
+	mq, err := rabbitmq.NewClient()
 	if err != nil {
-		log.Fatalf("failed to create rabbitmq conecton and channel: %v", err)
-	}
-
-	consumers, queues, err := rabbitmq.DeclareQueue(ch)
-	if err != nil {
-		log.Fatalf("failed to create queues and consumers: %v", err)
+		log.Fatalf("failed to connect to rabbitmq and declare queues: %v", err)
 	}
 
 	bd := broadcaster.NewBroadcaster()
 
-	service := services.NewRelayService(db, ch, bd, consumers, queues)
+	service := services.NewRelayService(db, bd, mq)
 
 	appctx, cancel := context.WithCancel(context.Background())
+	mq.Start(appctx)
 	go service.StartEngine(appctx)
 	go service.StartSyncer(appctx)
 
@@ -97,5 +93,9 @@ func main() {
 	}()
 
 	<-serverClose
+
+	if err := mq.Close(); err != nil {
+		log.Println("failed to close rabbitmq connection:", err)
+	}
 
 }

@@ -2,21 +2,20 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/spf13/viper"
 )
 
 func NewClient() (*sql.DB, error) {
 
-	//default
-	path := "./data/database.db"
-
-	if viper.GetString("db.path") != "" {
-		path = viper.GetString("db.path")
+	url := viper.GetString("db.url")
+	if url == "" {
+		return nil, errors.New("db.url is not set")
 	}
 
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("pgx", url)
 	if err != nil {
 		return nil, err
 	}

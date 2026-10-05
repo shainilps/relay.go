@@ -9,15 +9,33 @@ services:
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
 
+  postgres:
+    image: postgres:17-alpine
+    container_name: relay-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: relay
+      POSTGRES_DB: relay
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
   migrate:
     image: ghcr.io/kukymbr/goose-docker:3.28.0
     container_name: relay-migrate
     environment:
-      GOOSE_DRIVER: sqlite3
-      GOOSE_DBSTRING: /app/data/database.db
+      GOOSE_DRIVER: postgres
+      GOOSE_DBSTRING: postgres://relay:relay@postgres:5432/relay?sslmode=disable
     volumes:
       - ./internal/db/migrations:/migrations:ro
-      - sqlite_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   app:
     build: .
@@ -27,7 +45,6 @@ services:
       - "8080:8080"
     volumes:
       - ./.key:/app/.key
-      - sqlite_data:/app/data
     depends_on:
       rabbitmq:
         condition: service_started
@@ -36,4 +53,4 @@ services:
 
 volumes:
   rabbitmq_data:
-  sqlite_data:
+  postgres_data:

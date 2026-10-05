@@ -17,7 +17,7 @@ func CreateFundingUTXOsIfNotExists(ctx context.Context, db *sql.DB, utxos []mode
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO funding_utxos (utxo_id, tx_id, vout, amount) VALUES (?, ?, ?, ?)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO funding_utxos (utxo_id, tx_id, vout, amount) VALUES ($1, $2, $3, $4) ON CONFLICT (utxo_id) DO NOTHING`)
 	if err != nil {
 		return err
 	}
@@ -83,21 +83,21 @@ func CreateTransaction(ctx context.Context, db *sql.DB, transaction *model.Trans
 
 func createTransaction(ctx context.Context, tx *sql.Tx, transaction *model.Transaction, inputs []model.Outpoint) error {
 
-	_, err := tx.ExecContext(ctx, `INSERT INTO transactions (tx_id, tx_hex, network, status, next_attempt_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(tx_id) DO NOTHING`,
+	_, err := tx.ExecContext(ctx, `INSERT INTO transactions (tx_id, tx_hex, network, status, next_attempt_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (tx_id) DO NOTHING`,
 		transaction.TxID, transaction.TxHex, transaction.Network, model.PENDING, transaction.NextAttemptAt)
 	if err != nil {
 		return err
 	}
 
-	claimStmt, err := tx.PrepareContext(ctx, `INSERT INTO tx_inputs (prev_tx_id, vout, tx_id) VALUES (?, ?, ?)
-		ON CONFLICT(prev_tx_id, vout) DO UPDATE SET tx_id = excluded.tx_id, created_at = CURRENT_TIMESTAMP
-		WHERE (SELECT status FROM transactions WHERE transactions.tx_id = tx_inputs.tx_id) = ?`)
+	claimStmt, err := tx.PrepareContext(ctx, `INSERT INTO tx_inputs (prev_tx_id, vout, tx_id) VALUES ($1, $2, $3)
+		ON CONFLICT (prev_tx_id, vout) DO UPDATE SET tx_id = excluded.tx_id, created_at = now()
+		WHERE (SELECT status FROM transactions WHERE transactions.tx_id = tx_inputs.tx_id) = $4`)
 	if err != nil {
 		return err
 	}
 	defer claimStmt.Close()
 
-	ownerStmt, err := tx.PrepareContext(ctx, `SELECT tx_id FROM tx_inputs WHERE prev_tx_id = ? AND vout = ?`)
+	ownerStmt, err := tx.PrepareContext(ctx, `SELECT tx_id FROM tx_inputs WHERE prev_tx_id = $1 AND vout = $2`)
 	if err != nil {
 		return err
 	}
@@ -141,20 +141,14 @@ func StoreFundingTransaction(ctx context.Context, db *sql.DB, transaction *model
 	}
 
 	for _, utxo := range spent {
-		_, err := tx.ExecContext(ctx, `UPDATE funding_utxos SET is_spent = true WHERE utxo_id = ?`, utxo.UtxoID)
+		_, err := tx.ExecContext(ctx, `UPDATE funding_utxos SET is_spent = true WHERE utxo_id = $1`, utxo.UtxoID)
 		if err != nil {
 			return err
 		}
 	}
 
 	for _, utxo := range queueUtxos {
-		_, err := tx.ExecContext(ctx, `INSERT INTO funding_utxos (utxo_id, tx_id, vout, amount, is_spent) VALUES (?, ?, ?, ?, true) ON CONFLICT(utxo_id) DO UPDATE SET is_spent = true`,
-			utxo.UtxoID, utxo.TxID, utxo.Vout, utxo.Amount)
-		if err != nil {
-			return err
-		}
-
-		_, err = tx.ExecContext(ctx, `INSERT INTO queue_utxos (utxo_id, tx_id, vout, amount, queue) VALUES (?, ?, ?, ?, ?) ON CONFLICT(utxo_id) DO NOTHING`,
+		_, err := tx.ExecContext(ctx, `INSERT INTO queue_utxos (utxo_id, tx_id, vout, amount, queue) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (utxo_id) DO NOTHING`,
 			utxo.UtxoID, utxo.TxID, utxo.Vout, utxo.Amount, utxo.Queue)
 		if err != nil {
 			return err
@@ -162,7 +156,7 @@ func StoreFundingTransaction(ctx context.Context, db *sql.DB, transaction *model
 	}
 
 	if change != nil {
-		_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO funding_utxos (utxo_id, tx_id, vout, amount) VALUES (?, ?, ?, ?)`,
+		_, err := tx.ExecContext(ctx, `INSERT INTO funding_utxos (utxo_id, tx_id, vout, amount) VALUES ($1, $2, $3, $4) ON CONFLICT (utxo_id) DO NOTHING`,
 			change.UtxoID, change.TxID, change.Vout, change.Amount)
 		if err != nil {
 			return err
@@ -174,7 +168,7 @@ func StoreFundingTransaction(ctx context.Context, db *sql.DB, transaction *model
 
 func GetUnpublishedQueueUTXOs(ctx context.Context, db *sql.DB) ([]model.QueueUTXO, error) {
 
-	rows, err := db.QueryContext(ctx, `SELECT utxo_id, tx_id, vout, amount, queue FROM queue_utxos WHERE published IS FALSE ORDER BY rowid`)
+	rows, err := db.QueryContext(ctx, `SELECT utxo_id, tx_id, vout, amount, queue FROM queue_utxos WHERE published IS FALSE ORDER BY seq`)
 	if err != nil {
 		return nil, err
 	}
@@ -195,14 +189,14 @@ func GetUnpublishedQueueUTXOs(ctx context.Context, db *sql.DB) ([]model.QueueUTX
 
 func MarkQueueUTXOPublished(ctx context.Context, db *sql.DB, utxoID string) error {
 
-	_, err := db.ExecContext(ctx, `UPDATE queue_utxos SET published = true WHERE utxo_id = ?`, utxoID)
+	_, err := db.ExecContext(ctx, `UPDATE queue_utxos SET published = true WHERE utxo_id = $1`, utxoID)
 	return err
 }
 
 func GetSpendingTransaction(ctx context.Context, db *sql.DB, outpoint model.Outpoint) (string, error) {
 
 	var txID string
-	err := db.QueryRowContext(ctx, `SELECT tx_inputs.tx_id FROM tx_inputs JOIN transactions ON transactions.tx_id = tx_inputs.tx_id WHERE tx_inputs.prev_tx_id = ? AND tx_inputs.vout = ? AND transactions.status != ?`,
+	err := db.QueryRowContext(ctx, `SELECT tx_inputs.tx_id FROM tx_inputs JOIN transactions ON transactions.tx_id = tx_inputs.tx_id WHERE tx_inputs.prev_tx_id = $1 AND tx_inputs.vout = $2 AND transactions.status != $3`,
 		outpoint.TxID, outpoint.Vout, model.FAILED).Scan(&txID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
@@ -214,7 +208,7 @@ func GetSpendingTransaction(ctx context.Context, db *sql.DB, outpoint model.Outp
 	return txID, nil
 }
 
-const transactionColumns = `tx_id, tx_hex, network, status, attempts, last_broadcast_at, next_attempt_at, COALESCE(block_hash, ''), COALESCE(block_height, 0), COALESCE(last_error, ''), CAST(strftime('%s', created_at) AS INTEGER)`
+const transactionColumns = `tx_id, tx_hex, network, status, attempts, last_broadcast_at, next_attempt_at, COALESCE(block_hash, ''), COALESCE(block_height, 0), COALESCE(last_error, ''), EXTRACT(EPOCH FROM created_at)::BIGINT`
 
 func scanTransaction(row interface{ Scan(...any) error }) (*model.Transaction, error) {
 	var transaction model.Transaction
@@ -235,13 +229,13 @@ func scanTransaction(row interface{ Scan(...any) error }) (*model.Transaction, e
 
 func GetTransaction(ctx context.Context, db *sql.DB, txID string) (*model.Transaction, error) {
 
-	row := db.QueryRowContext(ctx, `SELECT `+transactionColumns+` FROM transactions WHERE tx_id = ?`, txID)
+	row := db.QueryRowContext(ctx, `SELECT `+transactionColumns+` FROM transactions WHERE tx_id = $1`, txID)
 	return scanTransaction(row)
 }
 
 func GetDueTransactions(ctx context.Context, db *sql.DB, now int64, limit int) ([]model.Transaction, error) {
 
-	rows, err := db.QueryContext(ctx, `SELECT `+transactionColumns+` FROM transactions WHERE status IN (?, ?) AND next_attempt_at <= ? ORDER BY rowid LIMIT ?`,
+	rows, err := db.QueryContext(ctx, `SELECT `+transactionColumns+` FROM transactions WHERE status IN ($1, $2) AND next_attempt_at <= $3 ORDER BY seq LIMIT $4`,
 		model.PENDING, model.BROADCASTED, now, limit)
 	if err != nil {
 		return nil, err
@@ -262,35 +256,35 @@ func GetDueTransactions(ctx context.Context, db *sql.DB, now int64, limit int) (
 
 func MarkBroadcasted(ctx context.Context, db *sql.DB, txID string, now int64, nextAttemptAt int64) error {
 
-	_, err := db.ExecContext(ctx, `UPDATE transactions SET status = ?, attempts = attempts + 1, last_broadcast_at = ?, next_attempt_at = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE tx_id = ?`,
+	_, err := db.ExecContext(ctx, `UPDATE transactions SET status = $1, attempts = attempts + 1, last_broadcast_at = $2, next_attempt_at = $3, last_error = NULL, updated_at = now() WHERE tx_id = $4`,
 		model.BROADCASTED, now, nextAttemptAt, txID)
 	return err
 }
 
 func RecordBroadcastError(ctx context.Context, db *sql.DB, txID string, errMsg string, nextAttemptAt int64) error {
 
-	_, err := db.ExecContext(ctx, `UPDATE transactions SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?, updated_at = CURRENT_TIMESTAMP WHERE tx_id = ?`,
+	_, err := db.ExecContext(ctx, `UPDATE transactions SET attempts = attempts + 1, last_error = $1, next_attempt_at = $2, updated_at = now() WHERE tx_id = $3`,
 		errMsg, nextAttemptAt, txID)
 	return err
 }
 
 func RecordUnreachable(ctx context.Context, db *sql.DB, txID string, errMsg string, nextAttemptAt int64) error {
 
-	_, err := db.ExecContext(ctx, `UPDATE transactions SET last_error = ?, next_attempt_at = ?, updated_at = CURRENT_TIMESTAMP WHERE tx_id = ?`,
+	_, err := db.ExecContext(ctx, `UPDATE transactions SET last_error = $1, next_attempt_at = $2, updated_at = now() WHERE tx_id = $3`,
 		errMsg, nextAttemptAt, txID)
 	return err
 }
 
 func MarkSynced(ctx context.Context, db *sql.DB, txID string, blockHash string, blockHeight uint64) error {
 
-	_, err := db.ExecContext(ctx, `UPDATE transactions SET status = ?, block_hash = ?, block_height = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE tx_id = ?`,
+	_, err := db.ExecContext(ctx, `UPDATE transactions SET status = $1, block_hash = $2, block_height = $3, last_error = NULL, updated_at = now() WHERE tx_id = $4`,
 		model.SYNCED, blockHash, blockHeight, txID)
 	return err
 }
 
 func MarkFailed(ctx context.Context, db *sql.DB, txID string, errMsg string) error {
 
-	_, err := db.ExecContext(ctx, `UPDATE transactions SET status = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE tx_id = ?`,
+	_, err := db.ExecContext(ctx, `UPDATE transactions SET status = $1, last_error = $2, updated_at = now() WHERE tx_id = $3`,
 		model.FAILED, errMsg, txID)
 	return err
 }
