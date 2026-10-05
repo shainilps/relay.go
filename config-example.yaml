@@ -19,6 +19,9 @@ rabbitmq:
 db:
   url: postgres://relay:relay@postgres:5432/relay?sslmode=disable
 
+redis:
+  url: redis://redis:6379/0
+
 #default 1
 fund_amount: 1
 funding_scan_interval: 5m

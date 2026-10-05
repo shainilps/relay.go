@@ -16,6 +16,7 @@ import (
 	"github.com/shainilps/relay/internal/handlers"
 	"github.com/shainilps/relay/internal/keymanager"
 	"github.com/shainilps/relay/internal/rabbitmq"
+	"github.com/shainilps/relay/internal/reservation"
 	"github.com/shainilps/relay/internal/services"
 	"github.com/spf13/viper"
 )
@@ -37,9 +38,14 @@ func main() {
 		log.Fatalf("failed to connect to rabbitmq and declare queues: %v", err)
 	}
 
+	redisClient, err := reservation.NewClient()
+	if err != nil {
+		log.Fatalf("failed to connect to redis: %v", err)
+	}
+
 	bd := broadcaster.NewBroadcaster()
 
-	service := services.NewRelayService(db, bd, mq)
+	service := services.NewRelayService(db, bd, mq, reservation.NewStore(redisClient))
 
 	appctx, cancel := context.WithCancel(context.Background())
 	mq.Start(appctx)
@@ -96,6 +102,10 @@ func main() {
 
 	if err := mq.Close(); err != nil {
 		log.Println("failed to close rabbitmq connection:", err)
+	}
+
+	if err := redisClient.Close(); err != nil {
+		log.Println("failed to close redis connection:", err)
 	}
 
 }

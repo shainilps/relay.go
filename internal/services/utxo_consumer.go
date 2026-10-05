@@ -16,6 +16,7 @@ import (
 	"github.com/shainilps/relay/internal/keymanager"
 	"github.com/shainilps/relay/internal/model"
 	"github.com/shainilps/relay/internal/rabbitmq"
+	"github.com/shainilps/relay/internal/reservation"
 	"github.com/spf13/viper"
 
 	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
@@ -25,12 +26,14 @@ const SAT_PER_KB = 100
 const DEFAULT_FUND_AMOUNT = 1
 const FUNDING_RETRY_INTERVAL = 30 * time.Second
 const DEFAULT_FUNDING_SCAN_INTERVAL = 5 * time.Minute
+const PARKED_CHECK_INTERVAL = time.Second
 const INPUT_SIZE = 149 // this is can be 149 also because DER singature can be 32/33
 const OUTPUT_SIZE = 34
 
 var MIN_CHANGE = feeForSize(INPUT_SIZE)
 
 func (r *RelayService) StartEngine(ctx context.Context) {
+	go r.watchParked(ctx)
 	r.syncFundingUtxos(ctx)
 	go r.scanFundingUtxos(ctx)
 	r.ingestUtxos(ctx)
@@ -398,7 +401,7 @@ func (r *RelayService) publishPending(ctx context.Context) bool {
 	return true
 }
 
-func (r *RelayService) AddUtxo(ctx context.Context, tx *transaction.Transaction) ([]amqp.Delivery, error) {
+func (r *RelayService) AddUtxo(ctx context.Context, tx *transaction.Transaction) ([]heldUtxo, error) {
 
 	address, err := keymanager.KeyManager.GetFeeAddress()
 	if err != nil {
@@ -424,18 +427,18 @@ func (r *RelayService) AddUtxo(ctx context.Context, tx *transaction.Transaction)
 
 	queunames := CalcuateQueues(fee)
 
-	deliveries := make([]amqp.Delivery, 0, len(queunames))
-	fail := func(err error) ([]amqp.Delivery, error) {
-		NackDeliveries(deliveries)
+	held := make([]heldUtxo, 0, len(queunames))
+	fail := func(err error) ([]heldUtxo, error) {
+		r.returnHeld(held)
 		return nil, err
 	}
 
 	for _, queuename := range queunames {
-		message, utxo, err := r.takeUtxo(ctx, queuename)
+		taken, utxo, err := r.takeUtxo(ctx, queuename)
 		if err != nil {
 			return fail(err)
 		}
-		deliveries = append(deliveries, message)
+		held = append(held, taken)
 
 		err = tx.AddInputFrom(utxo.TxID, utxo.Vout, lockingScriptStr, utxo.Amount, unlockingTemplate)
 		if err != nil {
@@ -448,17 +451,17 @@ func (r *RelayService) AddUtxo(ctx context.Context, tx *transaction.Transaction)
 		return fail(err)
 	}
 
-	return deliveries, nil
+	return held, nil
 }
 
-func (r *RelayService) takeUtxo(ctx context.Context, queuename rabbitmq.QueueName) (amqp.Delivery, model.UTXO, error) {
+func (r *RelayService) takeUtxo(ctx context.Context, queuename rabbitmq.QueueName) (heldUtxo, model.UTXO, error) {
 	timeout := time.After(10 * time.Second)
 
 	for {
 		select {
 
 		case <-timeout:
-			return amqp.Delivery{}, model.UTXO{}, fmt.Errorf("%w: timed out waiting utxo from queue %v", ErrOutOfFee, queuename)
+			return heldUtxo{}, model.UTXO{}, fmt.Errorf("%w: timed out waiting utxo from queue %v", ErrOutOfFee, queuename)
 
 		case message := <-r.mq.Deliveries(queuename):
 
@@ -466,24 +469,127 @@ func (r *RelayService) takeUtxo(ctx context.Context, queuename rabbitmq.QueueNam
 			err := json.Unmarshal(message.Body, &utxo)
 			if err != nil {
 				NackDeliveries([]amqp.Delivery{message})
-				return amqp.Delivery{}, model.UTXO{}, err
+				return heldUtxo{}, model.UTXO{}, err
 			}
+			outpoint := model.Outpoint{TxID: utxo.TxID, Vout: utxo.Vout}
 
 			dbctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			spentBy, err := repo.GetSpendingTransaction(dbctx, r.db, model.Outpoint{TxID: utxo.TxID, Vout: utxo.Vout})
+			spentBy, err := repo.GetSpendingTransaction(dbctx, r.db, outpoint)
 			cancel()
 			if err != nil {
 				NackDeliveries([]amqp.Delivery{message})
-				return amqp.Delivery{}, model.UTXO{}, err
+				return heldUtxo{}, model.UTXO{}, err
 			}
 
-			if spentBy == "" {
-				return message, utxo, nil
+			if spentBy != "" {
+				log.Printf("warning: dropping utxo %s from queue %s, already spent by tx %s\n", utxo.UtxoID, queuename, spentBy)
+				r.AckDeliveries([]amqp.Delivery{message})
+				continue
 			}
 
-			log.Printf("warning: dropping utxo %s from queue %s, already spent by tx %s\n", utxo.UtxoID, queuename, spentBy)
-			r.AckDeliveries([]amqp.Delivery{message})
+			reservectx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			token, reserved, err := r.reservations.Reserve(reservectx, outpoint)
+			cancel()
+			if err != nil {
+				log.Printf("warning: failed to reserve utxo %s, using it unreserved: %v\n", utxo.UtxoID, err)
+				return heldUtxo{delivery: message, outpoint: outpoint}, utxo, nil
+			}
+
+			if !reserved {
+				log.Printf("warning: utxo %s from queue %s is held by another request, parking it\n", utxo.UtxoID, queuename)
+				r.park(parkedUtxo{delivery: message, outpoint: outpoint})
+				continue
+			}
+
+			return heldUtxo{delivery: message, outpoint: outpoint, token: token}, utxo, nil
 		}
+	}
+}
+
+func (r *RelayService) commitHeld(held []heldUtxo) {
+	deliveries := make([]amqp.Delivery, 0, len(held))
+	for _, h := range held {
+		deliveries = append(deliveries, h.delivery)
+	}
+	r.AckDeliveries(deliveries)
+	r.releaseHeld(held)
+}
+
+func (r *RelayService) returnHeld(held []heldUtxo) {
+	deliveries := make([]amqp.Delivery, 0, len(held))
+	for _, h := range held {
+		deliveries = append(deliveries, h.delivery)
+	}
+	NackDeliveries(deliveries)
+	r.releaseHeld(held)
+}
+
+func (r *RelayService) releaseHeld(held []heldUtxo) {
+	for _, h := range held {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := r.reservations.Release(ctx, h.outpoint, h.token)
+		cancel()
+		if err != nil {
+			log.Printf("warning: failed to release reservation of %s:%d, it expires in %s: %v\n", h.outpoint.TxID, h.outpoint.Vout, reservation.TTL, err)
+		}
+	}
+}
+
+func (r *RelayService) park(parked parkedUtxo) {
+	r.parkedMu.Lock()
+	defer r.parkedMu.Unlock()
+	r.parked = append(r.parked, parked)
+}
+
+func (r *RelayService) watchParked(ctx context.Context) {
+	ticker := time.NewTicker(PARKED_CHECK_INTERVAL)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.resolveParked(ctx)
+		}
+	}
+}
+
+func (r *RelayService) resolveParked(ctx context.Context) {
+	r.parkedMu.Lock()
+	parked := r.parked
+	r.parked = nil
+	r.parkedMu.Unlock()
+
+	keep := make([]parkedUtxo, 0)
+	for _, p := range parked {
+		checkctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		reserved, err := r.reservations.IsReserved(checkctx, p.outpoint)
+		cancel()
+		if err != nil || reserved {
+			keep = append(keep, p)
+			continue
+		}
+
+		dbctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		spentBy, err := repo.GetSpendingTransaction(dbctx, r.db, p.outpoint)
+		cancel()
+		if err != nil {
+			keep = append(keep, p)
+			continue
+		}
+
+		if spentBy != "" {
+			r.AckDeliveries([]amqp.Delivery{p.delivery})
+			continue
+		}
+		NackDeliveries([]amqp.Delivery{p.delivery})
+	}
+
+	if len(keep) > 0 {
+		r.parkedMu.Lock()
+		r.parked = append(r.parked, keep...)
+		r.parkedMu.Unlock()
 	}
 }
 

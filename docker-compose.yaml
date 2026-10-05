@@ -25,6 +25,11 @@ services:
       timeout: 5s
       retries: 30
 
+  redis:
+    image: redis:7-alpine
+    container_name: relay-redis
+    restart: always
+
   migrate:
     image: ghcr.io/kukymbr/goose-docker:3.28.0
     container_name: relay-migrate
@@ -47,6 +52,8 @@ services:
       - ./.key:/app/.key
     depends_on:
       rabbitmq:
+        condition: service_started
+      redis:
         condition: service_started
       migrate:
         condition: service_completed_successfully

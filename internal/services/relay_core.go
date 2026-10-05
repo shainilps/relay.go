@@ -24,24 +24,45 @@ type UtxoQueue interface {
 	Publish(ctx context.Context, queue rabbitmq.QueueName, utxo *model.UTXO) error
 }
 
-type RelayService struct {
-	db          *sql.DB
-	broadcaster *broadcaster.Broadcaster
-	mq          UtxoQueue
-	fundingChan chan struct{}
-	deficitMu   sync.Mutex
-	deficit     map[rabbitmq.QueueName]int
-	syncConfig  SyncConfig
+type Reservations interface {
+	Reserve(ctx context.Context, outpoint model.Outpoint) (string, bool, error)
+	Release(ctx context.Context, outpoint model.Outpoint, token string) error
+	IsReserved(ctx context.Context, outpoint model.Outpoint) (bool, error)
 }
 
-func NewRelayService(db *sql.DB, broadcaster *broadcaster.Broadcaster, mq UtxoQueue) *RelayService {
+type heldUtxo struct {
+	delivery amqp.Delivery
+	outpoint model.Outpoint
+	token    string
+}
+
+type parkedUtxo struct {
+	delivery amqp.Delivery
+	outpoint model.Outpoint
+}
+
+type RelayService struct {
+	db           *sql.DB
+	broadcaster  *broadcaster.Broadcaster
+	mq           UtxoQueue
+	reservations Reservations
+	fundingChan  chan struct{}
+	deficitMu    sync.Mutex
+	deficit      map[rabbitmq.QueueName]int
+	parkedMu     sync.Mutex
+	parked       []parkedUtxo
+	syncConfig   SyncConfig
+}
+
+func NewRelayService(db *sql.DB, broadcaster *broadcaster.Broadcaster, mq UtxoQueue, reservations Reservations) *RelayService {
 	return &RelayService{
-		db:          db,
-		broadcaster: broadcaster,
-		mq:          mq,
-		fundingChan: make(chan struct{}, 1),
-		deficit:     make(map[rabbitmq.QueueName]int),
-		syncConfig:  LoadSyncConfig(),
+		db:           db,
+		broadcaster:  broadcaster,
+		mq:           mq,
+		reservations: reservations,
+		fundingChan:  make(chan struct{}, 1),
+		deficit:      make(map[rabbitmq.QueueName]int),
+		syncConfig:   LoadSyncConfig(),
 	}
 }
 
@@ -81,30 +102,30 @@ func (s *RelayService) FundAndBroadcast(ctx context.Context, txHex string) (*mod
 		return nil, err
 	}
 
-	deliveries, err := s.AddUtxo(ctx, tx)
+	held, err := s.AddUtxo(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
 
 	if err := verifyScripts(tx, true); err != nil {
-		NackDeliveries(deliveries)
+		s.returnHeld(held)
 		return nil, err
 	}
 	if err := checkFee(tx); err != nil {
-		NackDeliveries(deliveries)
+		s.returnHeld(held)
 		return nil, err
 	}
 
-	return s.submit(ctx, tx, deliveries)
+	return s.submit(ctx, tx, held)
 }
 
-func (s *RelayService) submit(ctx context.Context, tx *transaction.Transaction, deliveries []amqp.Delivery) (*model.Transaction, error) {
+func (s *RelayService) submit(ctx context.Context, tx *transaction.Transaction, held []heldUtxo) (*model.Transaction, error) {
 	stored, err := s.store(ctx, tx)
 	if err != nil {
-		NackDeliveries(deliveries)
+		s.returnHeld(held)
 		return nil, err
 	}
-	s.AckDeliveries(deliveries)
+	s.commitHeld(held)
 
 	return s.broadcastStored(ctx, stored)
 }
