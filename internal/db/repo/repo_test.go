@@ -16,7 +16,7 @@ func TestTransactionLifecycle(t *testing.T) {
 	ctx := context.Background()
 	db := dbtest.New(t)
 
-	tx := &model.Transaction{TxID: "tx1", TxHex: "00", Network: model.TEST, NextAttemptAt: 100}
+	tx := &model.Transaction{TxID: "tx1", TxHex: "00", NextAttemptAt: 100}
 	if err := CreateTransaction(ctx, db, tx, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestMarkFailed(t *testing.T) {
 	ctx := context.Background()
 	db := dbtest.New(t)
 
-	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "tx1", TxHex: "00", Network: model.MAIN}, nil); err != nil {
+	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "tx1", TxHex: "00"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := MarkFailed(ctx, db, "tx1", "not mined"); err != nil {
@@ -110,7 +110,7 @@ func TestRecordUnreachable(t *testing.T) {
 	ctx := context.Background()
 	db := dbtest.New(t)
 
-	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "tx1", TxHex: "00", Network: model.MAIN, NextAttemptAt: 500}, nil); err != nil {
+	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "tx1", TxHex: "00", NextAttemptAt: 500}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := RecordUnreachable(ctx, db, "tx1", "arc status 503", 100); err != nil {
@@ -132,18 +132,18 @@ func TestDoubleSpend(t *testing.T) {
 	parentOutput := model.Outpoint{TxID: "parent", Vout: 0}
 	otherOutput := model.Outpoint{TxID: "parent", Vout: 1}
 
-	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "child1", TxHex: "00", Network: model.MAIN}, []model.Outpoint{parentOutput}); err != nil {
+	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "child1", TxHex: "00"}, []model.Outpoint{parentOutput}); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Run("retrying the same tx is fine", func(t *testing.T) {
-		if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "child1", TxHex: "00", Network: model.MAIN}, []model.Outpoint{parentOutput}); err != nil {
+		if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "child1", TxHex: "00"}, []model.Outpoint{parentOutput}); err != nil {
 			t.Fatalf("expected idempotent insert, got %v", err)
 		}
 	})
 
 	t.Run("spending a claimed output is a double spend", func(t *testing.T) {
-		err := CreateTransaction(ctx, db, &model.Transaction{TxID: "child2", TxHex: "00", Network: model.MAIN}, []model.Outpoint{otherOutput, parentOutput})
+		err := CreateTransaction(ctx, db, &model.Transaction{TxID: "child2", TxHex: "00"}, []model.Outpoint{otherOutput, parentOutput})
 		var doubleSpendErr *DoubleSpendError
 		if !errors.As(err, &doubleSpendErr) || doubleSpendErr.SpentBy != "child1" {
 			t.Fatalf("expected double spend by child1, got %v", err)
@@ -164,7 +164,7 @@ func TestDoubleSpend(t *testing.T) {
 		if _, err := MarkFailed(ctx, db, "child1", "rejected"); err != nil {
 			t.Fatal(err)
 		}
-		if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "child3", TxHex: "00", Network: model.MAIN}, []model.Outpoint{parentOutput}); err != nil {
+		if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "child3", TxHex: "00"}, []model.Outpoint{parentOutput}); err != nil {
 			t.Fatalf("expected the output of a failed tx to be spendable, got %v", err)
 		}
 	})
@@ -184,7 +184,7 @@ func TestGetSpendingTransaction(t *testing.T) {
 		t.Fatalf("expected unspent, got spent by %s", spentBy)
 	}
 
-	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "tx1", TxHex: "00", Network: model.MAIN}, []model.Outpoint{feeUtxo}); err != nil {
+	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "tx1", TxHex: "00"}, []model.Outpoint{feeUtxo}); err != nil {
 		t.Fatal(err)
 	}
 	spentBy, err = GetSpendingTransaction(ctx, db, feeUtxo)
@@ -222,7 +222,7 @@ func TestStoreFundingTransaction(t *testing.T) {
 	}
 	change := &model.UTXO{UtxoID: "fund_2", TxID: "fund", Vout: 2, Amount: 9820}
 
-	err := StoreFundingTransaction(ctx, db, &model.Transaction{TxID: "fund", TxHex: "00", Network: model.MAIN}, []model.UTXO{fundingInput}, queueUtxos, change)
+	err := StoreFundingTransaction(ctx, db, &model.Transaction{TxID: "fund", TxHex: "00"}, []model.UTXO{fundingInput}, queueUtxos, change)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,11 +279,11 @@ func TestStoreFundingTransactionRollsBackOnDoubleSpend(t *testing.T) {
 	if err := CreateFundingUTXOsIfNotExists(ctx, db, []model.UTXO{fundingInput}); err != nil {
 		t.Fatal(err)
 	}
-	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "other", TxHex: "00", Network: model.MAIN}, []model.Outpoint{{TxID: "old", Vout: 0}}); err != nil {
+	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "other", TxHex: "00"}, []model.Outpoint{{TxID: "old", Vout: 0}}); err != nil {
 		t.Fatal(err)
 	}
 
-	err := StoreFundingTransaction(ctx, db, &model.Transaction{TxID: "fund", TxHex: "00", Network: model.MAIN}, []model.UTXO{fundingInput},
+	err := StoreFundingTransaction(ctx, db, &model.Transaction{TxID: "fund", TxHex: "00"}, []model.UTXO{fundingInput},
 		[]model.QueueUTXO{{UTXO: model.UTXO{UtxoID: "fund_0", TxID: "fund", Vout: 0, Amount: 50}, Queue: "QUEUE_50"}},
 		&model.UTXO{UtxoID: "fund_1", TxID: "fund", Vout: 1, Amount: 9900})
 	var doubleSpendErr *DoubleSpendError
@@ -316,7 +316,7 @@ func TestMarkFailedCascades(t *testing.T) {
 
 	create := func(txID string, status model.TransactionStatus, inputs ...model.Outpoint) {
 		t.Helper()
-		if err := CreateTransaction(ctx, db, &model.Transaction{TxID: txID, TxHex: "00", Network: model.MAIN}, inputs); err != nil {
+		if err := CreateTransaction(ctx, db, &model.Transaction{TxID: txID, TxHex: "00"}, inputs); err != nil {
 			t.Fatal(err)
 		}
 		if status == model.SYNCED {
@@ -372,7 +372,7 @@ func storeTestFunding(t *testing.T, db *sql.DB) {
 	if err := CreateFundingUTXOsIfNotExists(ctx, db, []model.UTXO{fundingInput}); err != nil {
 		t.Fatal(err)
 	}
-	err := StoreFundingTransaction(ctx, db, &model.Transaction{TxID: "fund", TxHex: "00", Network: model.MAIN}, []model.UTXO{fundingInput},
+	err := StoreFundingTransaction(ctx, db, &model.Transaction{TxID: "fund", TxHex: "00"}, []model.UTXO{fundingInput},
 		[]model.QueueUTXO{{UTXO: model.UTXO{UtxoID: "fund_0", TxID: "fund", Vout: 0, Amount: 50}, Queue: "QUEUE_50"}},
 		&model.UTXO{UtxoID: "fund_1", TxID: "fund", Vout: 1, Amount: 9900})
 	if err != nil {
@@ -432,7 +432,7 @@ func TestRecoverFeeUtxoFromFailedClientTx(t *testing.T) {
 	db := dbtest.New(t)
 	storeTestFunding(t, db)
 
-	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "client", TxHex: "00", Network: model.MAIN}, []model.Outpoint{{TxID: "fund", Vout: 0}}); err != nil {
+	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "client", TxHex: "00"}, []model.Outpoint{{TxID: "fund", Vout: 0}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := MarkFailed(ctx, db, "client", "expired"); err != nil {
@@ -473,7 +473,7 @@ func TestChainSpentIsNotACandidate(t *testing.T) {
 	db := dbtest.New(t)
 	storeTestFunding(t, db)
 
-	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "client", TxHex: "00", Network: model.MAIN}, []model.Outpoint{{TxID: "fund", Vout: 0}}); err != nil {
+	if err := CreateTransaction(ctx, db, &model.Transaction{TxID: "client", TxHex: "00"}, []model.Outpoint{{TxID: "fund", Vout: 0}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := MarkFailed(ctx, db, "client", "expired"); err != nil {
@@ -496,7 +496,7 @@ func TestReleaseClaims(t *testing.T) {
 	db := dbtest.New(t)
 
 	for _, txID := range []string{"a", "b"} {
-		if err := CreateTransaction(ctx, db, &model.Transaction{TxID: txID, TxHex: "00", Network: model.MAIN, NextAttemptAt: 100}, nil); err != nil {
+		if err := CreateTransaction(ctx, db, &model.Transaction{TxID: txID, TxHex: "00", NextAttemptAt: 100}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -520,7 +520,7 @@ func TestConcurrentClaimsDoNotOverlap(t *testing.T) {
 	db.SetMaxOpenConns(20)
 
 	for i := 0; i < 40; i++ {
-		if err := CreateTransaction(ctx, db, &model.Transaction{TxID: fmt.Sprint("tx", i), TxHex: "00", Network: model.MAIN, NextAttemptAt: 100}, nil); err != nil {
+		if err := CreateTransaction(ctx, db, &model.Transaction{TxID: fmt.Sprint("tx", i), TxHex: "00", NextAttemptAt: 100}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

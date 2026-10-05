@@ -30,18 +30,6 @@ services:
     container_name: relay-redis
     restart: always
 
-  migrate:
-    image: ghcr.io/kukymbr/goose-docker:3.28.0
-    container_name: relay-migrate
-    environment:
-      GOOSE_DRIVER: postgres
-      GOOSE_DBSTRING: postgres://relay:relay@postgres:5432/relay?sslmode=disable
-    volumes:
-      - ./internal/db/migrations:/migrations:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-
   app:
     build: .
     container_name: relay-app
@@ -55,8 +43,8 @@ services:
         condition: service_started
       redis:
         condition: service_started
-      migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
 
 volumes:
   rabbitmq_data:

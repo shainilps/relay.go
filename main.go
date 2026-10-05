@@ -28,12 +28,15 @@ func init() {
 
 func main() {
 
-	db, err := db.NewClient()
+	network := config.Network()
+	log.Printf("running on %s network\n", network)
+
+	db, err := db.NewClient(network)
 	if err != nil {
 		log.Fatalf("failed to create db client: %v", err)
 	}
 
-	mq, err := rabbitmq.NewClient()
+	mq, err := rabbitmq.NewClient(network)
 	if err != nil {
 		log.Fatalf("failed to connect to rabbitmq and declare queues: %v", err)
 	}
@@ -45,7 +48,7 @@ func main() {
 
 	bd := broadcaster.NewBroadcaster()
 
-	service := services.NewRelayService(db, bd, mq, reservation.NewStore(redisClient))
+	service := services.NewRelayService(db, bd, mq, reservation.NewStore(redisClient, network))
 
 	appctx, cancel := context.WithCancel(context.Background())
 	mq.Start(appctx)

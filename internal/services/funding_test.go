@@ -56,7 +56,7 @@ func newTestReservations(t *testing.T) *reservation.Store {
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() { client.Close() })
-	return reservation.NewStore(client)
+	return reservation.NewStore(client, model.MAIN)
 }
 
 func newFundingTestService() *RelayService {
@@ -153,7 +153,7 @@ func TestTakeUtxoDropsSpentUtxo(t *testing.T) {
 	spent := model.UTXO{UtxoID: "funding_0", TxID: "funding", Vout: 0, Amount: 50}
 	unspentRedelivered := model.UTXO{UtxoID: "funding_1", TxID: "funding", Vout: 1, Amount: 50}
 
-	if err := repo.CreateTransaction(ctx, db, &model.Transaction{TxID: "stored", TxHex: "00", Network: model.MAIN}, []model.Outpoint{{TxID: spent.TxID, Vout: spent.Vout}}); err != nil {
+	if err := repo.CreateTransaction(ctx, db, &model.Transaction{TxID: "stored", TxHex: "00"}, []model.Outpoint{{TxID: spent.TxID, Vout: spent.Vout}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -219,7 +219,7 @@ func TestTakeUtxoParksUtxoHeldByAnotherRequest(t *testing.T) {
 		t.Fatal("expected the utxo to stay parked while the holder keeps it")
 	}
 
-	if err := repo.CreateTransaction(ctx, db, &model.Transaction{TxID: "holder", TxHex: "00", Network: model.MAIN}, []model.Outpoint{{TxID: held.TxID, Vout: held.Vout}}); err != nil {
+	if err := repo.CreateTransaction(ctx, db, &model.Transaction{TxID: "holder", TxHex: "00"}, []model.Outpoint{{TxID: held.TxID, Vout: held.Vout}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := reservations.Release(ctx, model.Outpoint{TxID: held.TxID, Vout: held.Vout}, holderToken); err != nil {

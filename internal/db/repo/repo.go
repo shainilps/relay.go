@@ -83,8 +83,8 @@ func CreateTransaction(ctx context.Context, db *sql.DB, transaction *model.Trans
 
 func createTransaction(ctx context.Context, tx *sql.Tx, transaction *model.Transaction, inputs []model.Outpoint) error {
 
-	_, err := tx.ExecContext(ctx, `INSERT INTO transactions (tx_id, tx_hex, network, status, next_attempt_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (tx_id) DO NOTHING`,
-		transaction.TxID, transaction.TxHex, transaction.Network, model.PENDING, transaction.NextAttemptAt)
+	_, err := tx.ExecContext(ctx, `INSERT INTO transactions (tx_id, tx_hex, status, next_attempt_at) VALUES ($1, $2, $3, $4) ON CONFLICT (tx_id) DO NOTHING`,
+		transaction.TxID, transaction.TxHex, model.PENDING, transaction.NextAttemptAt)
 	if err != nil {
 		return err
 	}
@@ -217,13 +217,13 @@ func GetSpendingTransaction(ctx context.Context, db *sql.DB, outpoint model.Outp
 	return txID, nil
 }
 
-const transactionColumns = `tx_id, tx_hex, network, status, attempts, last_broadcast_at, next_attempt_at, COALESCE(block_hash, ''), COALESCE(block_height, 0), COALESCE(last_error, ''), EXTRACT(EPOCH FROM created_at)::BIGINT`
+const transactionColumns = `tx_id, tx_hex, status, attempts, last_broadcast_at, next_attempt_at, COALESCE(block_hash, ''), COALESCE(block_height, 0), COALESCE(last_error, ''), EXTRACT(EPOCH FROM created_at)::BIGINT`
 
 func scanTransaction(row interface{ Scan(...any) error }) (*model.Transaction, error) {
 	var transaction model.Transaction
 	var lastBroadcastAt sql.NullInt64
 
-	err := row.Scan(&transaction.TxID, &transaction.TxHex, &transaction.Network, &transaction.Status, &transaction.Attempts,
+	err := row.Scan(&transaction.TxID, &transaction.TxHex, &transaction.Status, &transaction.Attempts,
 		&lastBroadcastAt, &transaction.NextAttemptAt, &transaction.BlockHash, &transaction.BlockHeight, &transaction.LastError, &transaction.CreatedAt)
 	if err != nil {
 		return nil, err

@@ -24,6 +24,7 @@ return 0
 
 type Store struct {
 	client *redis.Client
+	prefix string
 }
 
 func NewClient() (*redis.Client, error) {
@@ -47,12 +48,12 @@ func NewClient() (*redis.Client, error) {
 	return client, nil
 }
 
-func NewStore(client *redis.Client) *Store {
-	return &Store{client: client}
+func NewStore(client *redis.Client, network model.Network) *Store {
+	return &Store{client: client, prefix: fmt.Sprintf("relay:%s:", network)}
 }
 
-func key(outpoint model.Outpoint) string {
-	return fmt.Sprintf("relay:fee-utxo:%s:%d", outpoint.TxID, outpoint.Vout)
+func (s *Store) key(outpoint model.Outpoint) string {
+	return fmt.Sprintf("%sfee-utxo:%s:%d", s.prefix, outpoint.TxID, outpoint.Vout)
 }
 
 func newToken() (string, error) {
@@ -88,23 +89,23 @@ func (s *Store) release(ctx context.Context, key string, token string) error {
 }
 
 func (s *Store) Reserve(ctx context.Context, outpoint model.Outpoint) (string, bool, error) {
-	return s.acquire(ctx, key(outpoint), TTL)
+	return s.acquire(ctx, s.key(outpoint), TTL)
 }
 
 func (s *Store) Release(ctx context.Context, outpoint model.Outpoint, token string) error {
-	return s.release(ctx, key(outpoint), token)
+	return s.release(ctx, s.key(outpoint), token)
 }
 
 func (s *Store) AcquireLock(ctx context.Context, name string, ttl time.Duration) (string, bool, error) {
-	return s.acquire(ctx, "relay:lock:"+name, ttl)
+	return s.acquire(ctx, s.prefix+"lock:"+name, ttl)
 }
 
 func (s *Store) ReleaseLock(ctx context.Context, name string, token string) error {
-	return s.release(ctx, "relay:lock:"+name, token)
+	return s.release(ctx, s.prefix+"lock:"+name, token)
 }
 
 func (s *Store) IsReserved(ctx context.Context, outpoint model.Outpoint) (bool, error) {
-	count, err := s.client.Exists(ctx, key(outpoint)).Result()
+	count, err := s.client.Exists(ctx, s.key(outpoint)).Result()
 	if err != nil {
 		return false, err
 	}

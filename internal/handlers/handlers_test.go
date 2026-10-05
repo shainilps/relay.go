@@ -17,7 +17,7 @@ import (
 func TestGetTransaction(t *testing.T) {
 	db := dbtest.New(t)
 	txID := strings.Repeat("ab", 32)
-	if err := repo.CreateTransaction(context.Background(), db, &model.Transaction{TxID: txID, TxHex: "00", Network: model.TEST}, nil); err != nil {
+	if err := repo.CreateTransaction(context.Background(), db, &model.Transaction{TxID: txID, TxHex: "00"}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -37,7 +37,7 @@ func TestGetTransaction(t *testing.T) {
 	if err := json.Unmarshal(found.Body.Bytes(), &tx); err != nil {
 		t.Fatal(err)
 	}
-	if tx.TxID != txID || tx.Status != model.PENDING || tx.Network != model.TEST {
+	if tx.TxID != txID || tx.Status != model.PENDING {
 		t.Fatalf("unexpected body %+v", tx)
 	}
 

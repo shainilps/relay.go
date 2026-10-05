@@ -5,7 +5,6 @@ CREATE TABLE transactions(
     seq BIGSERIAL NOT NULL UNIQUE,
     tx_id TEXT PRIMARY KEY,
     tx_hex TEXT NOT NULL,
-    network TEXT NOT NULL CHECK(network IN ('MAIN', 'TEST')),
     status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','BROADCASTED','SYNCED','FAILED')),
     attempts INT NOT NULL DEFAULT 0,
     last_broadcast_at BIGINT,

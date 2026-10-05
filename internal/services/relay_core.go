@@ -16,7 +16,6 @@ import (
 	"github.com/shainilps/relay/internal/keymanager"
 	"github.com/shainilps/relay/internal/model"
 	"github.com/shainilps/relay/internal/rabbitmq"
-	"github.com/spf13/viper"
 )
 
 type UtxoQueue interface {
@@ -152,7 +151,6 @@ func (s *RelayService) store(ctx context.Context, tx *transaction.Transaction) (
 	err := repo.CreateTransaction(ctx, s.db, &model.Transaction{
 		TxID:          txID,
 		TxHex:         txHex,
-		Network:       model.Network(viper.GetString("app.network")),
 		NextAttemptAt: time.Now().Add(s.syncConfig.RebroadcastInterval).Unix(),
 	}, inputs)
 	var doubleSpendErr *repo.DoubleSpendError

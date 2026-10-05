@@ -1,17 +1,16 @@
 package dbtest
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	relaydb "github.com/shainilps/relay/internal/db"
 )
 
 func New(t *testing.T) *sql.DB {
@@ -48,20 +47,10 @@ func New(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	_, file, _, _ := runtime.Caller(0)
-	files, err := filepath.Glob(filepath.Join(filepath.Dir(file), "..", "migrations", "*.sql"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, migration := range files {
-		content, err := os.ReadFile(migration)
-		if err != nil {
-			t.Fatal(err)
-		}
-		up, _, _ := strings.Cut(string(content), "-- +goose Down")
-		if _, err := db.Exec(up); err != nil {
-			t.Fatalf("migration %s: %v", migration, err)
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := relaydb.Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
 	}
 
 	return db

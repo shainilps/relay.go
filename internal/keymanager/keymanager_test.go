@@ -4,9 +4,13 @@ import (
 	"testing"
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
+	"github.com/spf13/viper"
 )
 
 func TestFeeKeyDerivation(t *testing.T) {
+	viper.Set("app.network", "MAIN")
+	t.Cleanup(func() { viper.Set("app.network", "") })
+
 	priv, err := ec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)

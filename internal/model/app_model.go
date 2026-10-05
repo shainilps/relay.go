@@ -35,7 +35,6 @@ type Outpoint struct {
 type Transaction struct {
 	TxID            string            `json:"txid"`
 	TxHex           string            `json:"-"`
-	Network         Network           `json:"network"`
 	Status          TransactionStatus `json:"status"`
 	Attempts        int               `json:"attempts"`
 	LastBroadcastAt *int64            `json:"lastBroadcastAt,omitempty"`

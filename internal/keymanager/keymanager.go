@@ -12,6 +12,8 @@ import (
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	script "github.com/bsv-blockchain/go-sdk/script"
 	transaction "github.com/bsv-blockchain/go-sdk/transaction/chaincfg"
+	"github.com/shainilps/relay/internal/config"
+	"github.com/shainilps/relay/internal/model"
 	"github.com/spf13/viper"
 )
 
@@ -37,7 +39,7 @@ func deriveFeeKey(privateKey *ec.PrivateKey) (*ec.PrivateKey, error) {
 }
 
 func addressOf(privateKey *ec.PrivateKey) (*script.Address, error) {
-	return script.NewAddressFromPublicKey(privateKey.PubKey(), viper.GetString("app.network") == "MAIN")
+	return script.NewAddressFromPublicKey(privateKey.PubKey(), config.Network() == model.MAIN)
 }
 
 func (k *Keys) GetPrivateKey() *ec.PrivateKey {
@@ -157,7 +159,7 @@ func saveWifAndMnemonic(privateKey *ec.PrivateKey, mnemonic string) error {
 		return fmt.Errorf("failed to save mnemonic: %w", err)
 	}
 
-	address, err := script.NewAddressFromPublicKey(privateKey.PubKey(), viper.GetString("app.network") == "MAIN")
+	address, err := script.NewAddressFromPublicKey(privateKey.PubKey(), config.Network() == model.MAIN)
 	if err != nil {
 		return fmt.Errorf("failed to save address: %v", err)
 	}

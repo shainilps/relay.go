@@ -1,6 +1,7 @@
 package broadcaster
 
 import (
+	"github.com/shainilps/relay/internal/config"
 	"github.com/shainilps/relay/internal/model"
 	"github.com/spf13/viper"
 )
@@ -11,7 +12,7 @@ type Broadcaster struct {
 }
 
 func NewBroadcaster() *Broadcaster {
-	network := model.Network(viper.GetString("app.network"))
+	network := config.Network()
 
 	providers := []*Arc{NewTaalArcProvider(network, viper.GetString("arc.token"))}
 

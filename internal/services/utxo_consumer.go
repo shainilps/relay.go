@@ -393,7 +393,6 @@ func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.Queu
 	fundingTx := &model.Transaction{
 		TxID:          txID,
 		TxHex:         extendedHex,
-		Network:       model.Network(viper.GetString("app.network")),
 		NextAttemptAt: time.Now().Add(r.syncConfig.RebroadcastInterval).Unix(),
 	}
 
@@ -697,7 +696,7 @@ func (r *RelayService) AckDeliveries(deliveries []amqp.Delivery) {
 			log.Printf("critical: failed to ack utxo message %d: %v\n", delivery.DeliveryTag, err)
 			continue
 		}
-		consumed[rabbitmq.QueueName(delivery.RoutingKey)]++
+		consumed[rabbitmq.QueueFromRoutingKey(delivery.RoutingKey)]++
 	}
 
 	if len(consumed) > 0 {

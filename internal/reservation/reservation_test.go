@@ -15,7 +15,7 @@ func newTestStore(t *testing.T) (*Store, *miniredis.Miniredis) {
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() { client.Close() })
-	return NewStore(client), server
+	return NewStore(client, model.MAIN), server
 }
 
 func TestReserveIsExclusive(t *testing.T) {
@@ -104,5 +104,27 @@ func TestLockIsExclusiveUntilReleased(t *testing.T) {
 	server.FastForward(time.Minute)
 	if _, ok, _ := store.AcquireLock(ctx, "funding", time.Minute); !ok {
 		t.Fatal("expected an abandoned lock to expire")
+	}
+}
+
+func TestNetworksAreIsolated(t *testing.T) {
+	ctx := context.Background()
+	mainStore, server := newTestStore(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { client.Close() })
+	testStore := NewStore(client, model.TEST)
+	outpoint := model.Outpoint{TxID: "fund", Vout: 0}
+
+	if _, ok, err := mainStore.Reserve(ctx, outpoint); err != nil || !ok {
+		t.Fatalf("reserve on main failed: %v %v", ok, err)
+	}
+	if _, ok, err := testStore.Reserve(ctx, outpoint); err != nil || !ok {
+		t.Fatalf("expected a main reservation not to block test, got %v %v", ok, err)
+	}
+	if _, ok, err := mainStore.AcquireLock(ctx, "funding", time.Minute); err != nil || !ok {
+		t.Fatalf("lock on main failed: %v %v", ok, err)
+	}
+	if _, ok, err := testStore.AcquireLock(ctx, "funding", time.Minute); err != nil || !ok {
+		t.Fatalf("expected a main lock not to block test, got %v %v", ok, err)
 	}
 }

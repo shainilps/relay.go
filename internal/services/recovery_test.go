@@ -24,7 +24,7 @@ func TestRecoverUtxos(t *testing.T) {
 		{UTXO: model.UTXO{UtxoID: "fund_0", TxID: "fund", Vout: 0, Amount: 50}, Queue: "QUEUE_50"},
 		{UTXO: model.UTXO{UtxoID: "fund_1", TxID: "fund", Vout: 1, Amount: 50}, Queue: "QUEUE_50"},
 	}
-	if err := repo.StoreFundingTransaction(ctx, db, &model.Transaction{TxID: "fund", TxHex: "00", Network: model.MAIN}, []model.UTXO{fundingInput}, queueUtxos, nil); err != nil {
+	if err := repo.StoreFundingTransaction(ctx, db, &model.Transaction{TxID: "fund", TxHex: "00"}, []model.UTXO{fundingInput}, queueUtxos, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, utxo := range queueUtxos {
@@ -34,7 +34,7 @@ func TestRecoverUtxos(t *testing.T) {
 	}
 
 	for i, client := range []string{"client_a", "client_b"} {
-		if err := repo.CreateTransaction(ctx, db, &model.Transaction{TxID: client, TxHex: "00", Network: model.MAIN}, []model.Outpoint{{TxID: "fund", Vout: uint32(i)}}); err != nil {
+		if err := repo.CreateTransaction(ctx, db, &model.Transaction{TxID: client, TxHex: "00"}, []model.Outpoint{{TxID: "fund", Vout: uint32(i)}}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := repo.MarkFailed(ctx, db, client, "expired"); err != nil {

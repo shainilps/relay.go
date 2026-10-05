@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,7 @@ const (
 
 type Client struct {
 	url      string
+	network  model.Network
 	prefetch int
 
 	connMu sync.Mutex
@@ -34,7 +36,7 @@ type Client struct {
 	queues     map[QueueName]amqp.Queue
 }
 
-func NewClient() (*Client, error) {
+func NewClient(network model.Network) (*Client, error) {
 
 	prefetch := viper.GetInt("rabbitmq.prefetch")
 	if prefetch <= 0 {
@@ -43,6 +45,7 @@ func NewClient() (*Client, error) {
 
 	client := &Client{
 		url:        viper.GetString("rabbitmq.url"),
+		network:    network,
 		prefetch:   prefetch,
 		deliveries: make(map[QueueName]chan amqp.Delivery),
 		queues:     make(map[QueueName]amqp.Queue),
@@ -55,7 +58,7 @@ func NewClient() (*Client, error) {
 	defer ch.Close()
 
 	for _, queue := range Queues {
-		q, err := declareQueue(ch, queue)
+		q, err := declareQueue(ch, client.physicalName(queue))
 		if err != nil {
 			return nil, err
 		}
@@ -66,9 +69,20 @@ func NewClient() (*Client, error) {
 	return client, nil
 }
 
-func declareQueue(ch *amqp.Channel, queue QueueName) (amqp.Queue, error) {
+func (c *Client) physicalName(queue QueueName) string {
+	return string(c.network) + "." + string(queue)
+}
+
+func QueueFromRoutingKey(routingKey string) QueueName {
+	if i := strings.LastIndex(routingKey, "."); i >= 0 {
+		return QueueName(routingKey[i+1:])
+	}
+	return QueueName(routingKey)
+}
+
+func declareQueue(ch *amqp.Channel, name string) (amqp.Queue, error) {
 	return ch.QueueDeclare(
-		string(queue),
+		name,
 		true,
 		false,
 		false,
@@ -161,12 +175,12 @@ func (c *Client) consumeUntilClosed(ctx context.Context, queue QueueName) error 
 		return err
 	}
 
-	_, err = declareQueue(ch, queue)
+	_, err = declareQueue(ch, c.physicalName(queue))
 	if err != nil {
 		return err
 	}
 
-	msgs, err := ch.Consume(string(queue), "", false, false, false, false, nil)
+	msgs, err := ch.Consume(c.physicalName(queue), "", false, false, false, false, nil)
 	if err != nil {
 		return err
 	}
@@ -234,7 +248,7 @@ func (c *Client) Publish(ctx context.Context, queueName QueueName, utxo *model.U
 	confirmation, err := ch.PublishWithDeferredConfirmWithContext(
 		ctx,
 		"",
-		string(queueName),
+		c.physicalName(queueName),
 		true,
 		false,
 		amqp.Publishing{
