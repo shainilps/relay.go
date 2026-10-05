@@ -22,6 +22,11 @@ type UTXO struct {
 	Amount uint64
 }
 
+type QueueUTXO struct {
+	UTXO
+	Queue string
+}
+
 type Outpoint struct {
 	TxID string
 	Vout uint32

@@ -79,7 +79,7 @@ func (s *RelayService) FundAndBroadcast(ctx context.Context, txHex string) (*mod
 		return nil, err
 	}
 
-	deliveries, err := s.AddUtxo(tx)
+	deliveries, err := s.AddUtxo(ctx, tx)
 	if err != nil {
 		return nil, err
 	}

@@ -1,7 +1,10 @@
 package rabbitmq
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -17,6 +20,11 @@ func NewClient() (*amqp.Connection, *amqp.Channel, error) {
 	}
 
 	ch, err := conn.Channel()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	err = ch.Confirm(false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -62,15 +70,15 @@ func DeclareQueue(ch *amqp.Channel) (map[QueueName](<-chan amqp.Delivery), map[Q
 	return consumers, queues, nil
 }
 
-func Publish(ch *amqp.Channel, queueName QueueName, utxo *model.UTXO) error {
+func Publish(ctx context.Context, ch *amqp.Channel, queueName QueueName, utxo *model.UTXO) error {
 
 	utxoBytes, err := json.Marshal(utxo)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("publish to %v queue and the utxo model: %+v", queueName, utxo)
-	return ch.Publish(
+	confirmation, err := ch.PublishWithDeferredConfirmWithContext(
+		ctx,
 		"",
 		string(queueName),
 		true,
@@ -81,4 +89,21 @@ func Publish(ch *amqp.Channel, queueName QueueName, utxo *model.UTXO) error {
 			DeliveryMode: amqp.Persistent,
 		},
 	)
+	if err != nil {
+		return err
+	}
+	if confirmation == nil {
+		return errors.New("channel is not in confirm mode")
+	}
+
+	acked, err := confirmation.WaitContext(ctx)
+	if err != nil {
+		return err
+	}
+	if !acked {
+		return fmt.Errorf("broker nacked utxo %s for queue %s", utxo.UtxoID, queueName)
+	}
+
+	log.Printf("published utxo %s to queue %s\n", utxo.UtxoID, queueName)
+	return nil
 }

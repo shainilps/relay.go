@@ -3,19 +3,11 @@ package repo
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/shainilps/relay/internal/model"
 )
-
-func CreateFundingUTXO(ctx context.Context, db *sql.DB, utxo *model.UTXO) error {
-
-	_, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO funding_utxos (utxo_id, tx_id, vout, amount) VALUES (?, ?, ?, ?)`, utxo.UtxoID, utxo.TxID, utxo.Vout, utxo.Amount)
-	if err != nil {
-		return err
-	}
-	return nil
-}
 
 func CreateFundingUTXOsIfNotExists(ctx context.Context, db *sql.DB, utxos []model.UTXO) error {
 
@@ -41,30 +33,6 @@ func CreateFundingUTXOsIfNotExists(ctx context.Context, db *sql.DB, utxos []mode
 	return tx.Commit()
 }
 
-func CreateFundingUTXOsIfNotExistsAndMarkAsSpent(ctx context.Context, db *sql.DB, utxos []model.UTXO) error {
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO funding_utxos (utxo_id, tx_id, vout, amount, is_spent) VALUES (?, ?, ?, ?, true) ON CONFLICT(utxo_id) DO UPDATE SET is_spent = true`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, utxo := range utxos {
-		_, err := stmt.ExecContext(ctx, utxo.UtxoID, utxo.TxID, utxo.Vout, utxo.Amount)
-		if err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
 func GetAllUnspentFundingUTXOs(ctx context.Context, db *sql.DB) ([]model.UTXO, error) {
 
 	utxos := make([]model.UTXO, 0)
@@ -73,6 +41,7 @@ func GetAllUnspentFundingUTXOs(ctx context.Context, db *sql.DB) ([]model.UTXO, e
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
 	for rows.Next() {
 		var utxo model.UTXO
@@ -84,31 +53,7 @@ func GetAllUnspentFundingUTXOs(ctx context.Context, db *sql.DB) ([]model.UTXO, e
 		utxos = append(utxos, utxo)
 	}
 
-	return utxos, nil
-}
-
-func MarkFundingUTXOsAsSpent(ctx context.Context, db *sql.DB, utxos []model.UTXO) error {
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.PrepareContext(ctx, `UPDATE funding_utxos SET is_spent = true WHERE utxo_id = ?`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, utxo := range utxos {
-		_, err := stmt.ExecContext(ctx, utxo.UtxoID)
-		if err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
+	return utxos, rows.Err()
 }
 
 type DoubleSpendError struct {
@@ -128,7 +73,17 @@ func CreateTransaction(ctx context.Context, db *sql.DB, transaction *model.Trans
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `INSERT INTO transactions (tx_id, tx_hex, network, status, next_attempt_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(tx_id) DO NOTHING`,
+	err = createTransaction(ctx, tx, transaction, inputs)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func createTransaction(ctx context.Context, tx *sql.Tx, transaction *model.Transaction, inputs []model.Outpoint) error {
+
+	_, err := tx.ExecContext(ctx, `INSERT INTO transactions (tx_id, tx_hex, network, status, next_attempt_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(tx_id) DO NOTHING`,
 		transaction.TxID, transaction.TxHex, transaction.Network, model.PENDING, transaction.NextAttemptAt)
 	if err != nil {
 		return err
@@ -164,7 +119,99 @@ func CreateTransaction(ctx context.Context, db *sql.DB, transaction *model.Trans
 		}
 	}
 
+	return nil
+}
+
+func StoreFundingTransaction(ctx context.Context, db *sql.DB, transaction *model.Transaction, spent []model.UTXO, queueUtxos []model.QueueUTXO, change *model.UTXO) error {
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	inputs := make([]model.Outpoint, 0, len(spent))
+	for _, utxo := range spent {
+		inputs = append(inputs, model.Outpoint{TxID: utxo.TxID, Vout: utxo.Vout})
+	}
+
+	err = createTransaction(ctx, tx, transaction, inputs)
+	if err != nil {
+		return err
+	}
+
+	for _, utxo := range spent {
+		_, err := tx.ExecContext(ctx, `UPDATE funding_utxos SET is_spent = true WHERE utxo_id = ?`, utxo.UtxoID)
+		if err != nil {
+			return err
+		}
+	}
+
+	for _, utxo := range queueUtxos {
+		_, err := tx.ExecContext(ctx, `INSERT INTO funding_utxos (utxo_id, tx_id, vout, amount, is_spent) VALUES (?, ?, ?, ?, true) ON CONFLICT(utxo_id) DO UPDATE SET is_spent = true`,
+			utxo.UtxoID, utxo.TxID, utxo.Vout, utxo.Amount)
+		if err != nil {
+			return err
+		}
+
+		_, err = tx.ExecContext(ctx, `INSERT INTO queue_utxos (utxo_id, tx_id, vout, amount, queue) VALUES (?, ?, ?, ?, ?) ON CONFLICT(utxo_id) DO NOTHING`,
+			utxo.UtxoID, utxo.TxID, utxo.Vout, utxo.Amount, utxo.Queue)
+		if err != nil {
+			return err
+		}
+	}
+
+	if change != nil {
+		_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO funding_utxos (utxo_id, tx_id, vout, amount) VALUES (?, ?, ?, ?)`,
+			change.UtxoID, change.TxID, change.Vout, change.Amount)
+		if err != nil {
+			return err
+		}
+	}
+
 	return tx.Commit()
+}
+
+func GetUnpublishedQueueUTXOs(ctx context.Context, db *sql.DB) ([]model.QueueUTXO, error) {
+
+	rows, err := db.QueryContext(ctx, `SELECT utxo_id, tx_id, vout, amount, queue FROM queue_utxos WHERE published IS FALSE ORDER BY rowid`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	utxos := make([]model.QueueUTXO, 0)
+	for rows.Next() {
+		var utxo model.QueueUTXO
+		err := rows.Scan(&utxo.UtxoID, &utxo.TxID, &utxo.Vout, &utxo.Amount, &utxo.Queue)
+		if err != nil {
+			return nil, err
+		}
+		utxos = append(utxos, utxo)
+	}
+
+	return utxos, rows.Err()
+}
+
+func MarkQueueUTXOPublished(ctx context.Context, db *sql.DB, utxoID string) error {
+
+	_, err := db.ExecContext(ctx, `UPDATE queue_utxos SET published = true WHERE utxo_id = ?`, utxoID)
+	return err
+}
+
+func GetSpendingTransaction(ctx context.Context, db *sql.DB, outpoint model.Outpoint) (string, error) {
+
+	var txID string
+	err := db.QueryRowContext(ctx, `SELECT tx_inputs.tx_id FROM tx_inputs JOIN transactions ON transactions.tx_id = tx_inputs.tx_id WHERE tx_inputs.prev_tx_id = ? AND tx_inputs.vout = ? AND transactions.status != ?`,
+		outpoint.TxID, outpoint.Vout, model.FAILED).Scan(&txID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return txID, nil
 }
 
 const transactionColumns = `tx_id, tx_hex, network, status, attempts, last_broadcast_at, next_attempt_at, COALESCE(block_hash, ''), COALESCE(block_height, 0), COALESCE(last_error, ''), CAST(strftime('%s', created_at) AS INTEGER)`

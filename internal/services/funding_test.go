@@ -1,10 +1,19 @@
 package services
 
 import (
+	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	_ "github.com/mattn/go-sqlite3"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/shainilps/relay/internal/db/repo"
+	"github.com/shainilps/relay/internal/model"
 	"github.com/shainilps/relay/internal/rabbitmq"
 )
 
@@ -83,5 +92,92 @@ func TestAckDeliveriesWithNothingAckedDoesNotSignal(t *testing.T) {
 	case <-r.fundingChan:
 		t.Fatal("expected no funding signal")
 	default:
+	}
+}
+
+func newTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+
+	files, err := filepath.Glob("../db/migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		content, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		up, _, _ := strings.Cut(string(content), "-- +goose Down")
+		if _, err := db.Exec(up); err != nil {
+			t.Fatalf("migration %s: %v", file, err)
+		}
+	}
+	return db
+}
+
+type recordingAcknowledger struct {
+	acked  []uint64
+	nacked []uint64
+}
+
+func (a *recordingAcknowledger) Ack(tag uint64, multiple bool) error {
+	a.acked = append(a.acked, tag)
+	return nil
+}
+
+func (a *recordingAcknowledger) Nack(tag uint64, multiple bool, requeue bool) error {
+	a.nacked = append(a.nacked, tag)
+	return nil
+}
+
+func (a *recordingAcknowledger) Reject(tag uint64, requeue bool) error {
+	return nil
+}
+
+func utxoDelivery(t *testing.T, acknowledger amqp.Acknowledger, tag uint64, redelivered bool, utxo model.UTXO) amqp.Delivery {
+	t.Helper()
+	body, err := json.Marshal(utxo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return amqp.Delivery{Acknowledger: acknowledger, DeliveryTag: tag, Redelivered: redelivered, RoutingKey: string(rabbitmq.QUEUE_50), Body: body}
+}
+
+func TestTakeUtxoDropsSpentUtxo(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	spent := model.UTXO{UtxoID: "funding_0", TxID: "funding", Vout: 0, Amount: 50}
+	unspentRedelivered := model.UTXO{UtxoID: "funding_1", TxID: "funding", Vout: 1, Amount: 50}
+
+	if err := repo.CreateTransaction(ctx, db, &model.Transaction{TxID: "stored", TxHex: "00", Network: model.MAIN}, []model.Outpoint{{TxID: spent.TxID, Vout: spent.Vout}}); err != nil {
+		t.Fatal(err)
+	}
+
+	acknowledger := &recordingAcknowledger{}
+	queue := make(chan amqp.Delivery, 2)
+	queue <- utxoDelivery(t, acknowledger, 1, false, spent)
+	queue <- utxoDelivery(t, acknowledger, 2, true, unspentRedelivered)
+
+	r := NewRelayService(db, nil, nil, map[rabbitmq.QueueName]<-chan amqp.Delivery{rabbitmq.QUEUE_50: queue}, nil)
+
+	message, utxo, err := r.takeUtxo(ctx, rabbitmq.QUEUE_50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.DeliveryTag != 2 || utxo.UtxoID != unspentRedelivered.UtxoID {
+		t.Fatalf("expected the unspent redelivered utxo, got tag %d utxo %s", message.DeliveryTag, utxo.UtxoID)
+	}
+	if len(acknowledger.acked) != 1 || acknowledger.acked[0] != 1 || len(acknowledger.nacked) != 0 {
+		t.Fatalf("expected only the spent utxo to be acked, got acked %v nacked %v", acknowledger.acked, acknowledger.nacked)
+	}
+	if deficit := r.takeDeficit(); deficit[rabbitmq.QUEUE_50] != 1 {
+		t.Fatalf("expected the dropped utxo to be refunded, got %v", deficit)
 	}
 }
