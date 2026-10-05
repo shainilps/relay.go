@@ -223,10 +223,6 @@ func (s *RelayService) GetTransaction(ctx context.Context, txID string) (*model.
 	return tx, err
 }
 
-func (s *RelayService) GetFundingAddress() (string, error) {
-	addr, err := keymanager.KeyManager.GetAddress()
-	if err != nil {
-		return "", err
-	}
-	return addr.AddressString, nil
+func (s *RelayService) GetAddresses() (string, string, error) {
+	return keymanager.KeyManager.Addresses()
 }

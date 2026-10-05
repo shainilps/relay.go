@@ -112,11 +112,11 @@ func (h *Handler) GetFundingAddress(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	addr, err := h.service.GetFundingAddress()
+	funding, fee, err := h.service.GetAddresses()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"address": addr})
+	json.NewEncoder(w).Encode(map[string]string{"address": funding, "feeAddress": fee})
 }

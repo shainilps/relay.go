@@ -146,8 +146,10 @@ and `blockHeight`, once failed it includes `lastError`.
 ### `GET /funding-address`
 
 ```json
-{ "address": "1…" }
+{ "address": "1…", "feeAddress": "1…" }
 ```
+
+`address` is where deposits go. `feeAddress` holds the split fee utxos, it is never funded directly.
 
 ### `GET /health`
 
@@ -253,13 +255,14 @@ Keys live in `.key/`, mounted into the container at `/app/.key`.
 
 - On start the relay loads `.key/wif.txt`, otherwise derives a key from `.key/mnemonic.txt` (with
   `key.password` as the BIP39 passphrase, empty by default), otherwise generates a new key and writes
-  `wif.txt`, `mnemonic.txt`, `address.txt` and `pubkey.txt`.
+  `wif.txt`, `mnemonic.txt`, `address.txt`, `fee_address.txt` and `pubkey.txt`.
 - A `wif.txt` that exists but cannot be parsed is treated as missing. Without a mnemonic a new key
   is generated and **`wif.txt` is overwritten**, so keep a backup of it.
 - To use your own key, put its WIF in `.key/wif.txt`.
 - The relay uses two addresses. The **funding address** (from `wif.txt`) receives deposits and
-  funding change. The **fee address** holds the split fee utxos and is derived from the same key, so
-  `wif.txt` is the only secret to back up.
+  funding change. The **fee address** holds the split fee utxos and is derived from the same key
+  (BRC-42), so `wif.txt` is the only secret to back up. Both addresses are logged at startup and
+  returned by `/funding-address`.
 
 ## Networks
 

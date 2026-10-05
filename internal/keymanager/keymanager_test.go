@@ -46,3 +46,24 @@ func TestFeeKeyDerivation(t *testing.T) {
 		t.Fatal("expected different main keys to derive different fee keys")
 	}
 }
+
+func TestAddresses(t *testing.T) {
+	viper.Set("app.network", "MAIN")
+	t.Cleanup(func() { viper.Set("app.network", "") })
+
+	priv, err := ec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := newKeys(priv)
+
+	funding, fee, err := keys.Addresses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fundingAddress, _ := keys.GetAddress()
+	feeAddress, _ := keys.GetFeeAddress()
+	if funding != fundingAddress.AddressString || fee != feeAddress.AddressString || funding == fee {
+		t.Fatalf("expected the funding and fee addresses, got %s %s", funding, fee)
+	}
+}

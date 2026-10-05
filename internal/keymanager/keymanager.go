@@ -54,6 +54,18 @@ func (k *Keys) GetAddress() (*script.Address, error) {
 	return addressOf(k.privateky)
 }
 
+func (k *Keys) Addresses() (string, string, error) {
+	funding, err := k.GetAddress()
+	if err != nil {
+		return "", "", err
+	}
+	fee, err := k.GetFeeAddress()
+	if err != nil {
+		return "", "", err
+	}
+	return funding.AddressString, fee.AddressString, nil
+}
+
 func (k *Keys) GetFeePrivateKey() *ec.PrivateKey {
 	return k.feeKey
 }
@@ -63,7 +75,7 @@ func (k *Keys) GetFeeAddress() (*script.Address, error) {
 }
 
 func Intiate() {
-	defer zap.L().Info("keys loaded")
+	defer logAddresses()
 
 	{
 		privKey, err := readWifFile(".key/wif.txt")
@@ -174,7 +186,29 @@ func saveWifAndMnemonic(privateKey *ec.PrivateKey, mnemonic string) error {
 		return fmt.Errorf("failed to save address: %v", err)
 	}
 
+	_, feeAddress, err := newKeys(privateKey).Addresses()
+	if err != nil {
+		return fmt.Errorf("failed to derive fee address: %w", err)
+	}
+
+	err = os.WriteFile(".key/fee_address.txt", []byte(feeAddress), 0600)
+	if err != nil {
+		return fmt.Errorf("failed to save fee address: %w", err)
+	}
+
 	return nil
+}
+
+func logAddresses() {
+	if KeyManager == nil {
+		return
+	}
+	funding, fee, err := KeyManager.Addresses()
+	if err != nil {
+		zap.L().Error("failed to derive addresses", zap.Error(err))
+		return
+	}
+	zap.L().Info("keys loaded", zap.String("funding_address", funding), zap.String("fee_address", fee))
 }
 
 func readWifFile(path string) (*ec.PrivateKey, error) {
