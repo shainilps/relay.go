@@ -60,7 +60,7 @@ transaction also fails every pending transaction chained off it.
 
 - Docker with Compose (or Podman with podman-compose)
 - A TAAL ARC token
-- Go 1.25+ only to build or test outside Docker
+- Go 1.27+ only to build or test outside Docker
 
 Compose runs everything the relay needs: PostgreSQL, RabbitMQ, Redis and Grafana (`otel-lgtm`).
 
