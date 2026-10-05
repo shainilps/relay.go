@@ -6,6 +6,8 @@ app:
 #taal(necessary)
 arc:
   token:
+  fallback_url:
+  fallback_token:
 
 #whatsonchain(optional)
 woc:
@@ -25,6 +27,8 @@ redis:
 #default 1
 fund_amount: 1
 funding_scan_interval: 5m
+recovery_interval: 10m
+fee_policy_interval: 30m
 
 sync:
   max_attempts: 5

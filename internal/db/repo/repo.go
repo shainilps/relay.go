@@ -168,7 +168,9 @@ func StoreFundingTransaction(ctx context.Context, db *sql.DB, transaction *model
 
 func GetUnpublishedQueueUTXOs(ctx context.Context, db *sql.DB) ([]model.QueueUTXO, error) {
 
-	rows, err := db.QueryContext(ctx, `SELECT utxo_id, tx_id, vout, amount, queue FROM queue_utxos WHERE published IS FALSE ORDER BY seq`)
+	rows, err := db.QueryContext(ctx, `SELECT queue_utxos.utxo_id, queue_utxos.tx_id, queue_utxos.vout, queue_utxos.amount, queue_utxos.queue FROM queue_utxos
+		JOIN transactions ON transactions.tx_id = queue_utxos.tx_id
+		WHERE queue_utxos.published IS FALSE AND transactions.status != $1 ORDER BY queue_utxos.seq`, model.FAILED)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +193,13 @@ func MarkQueueUTXOPublished(ctx context.Context, db *sql.DB, utxoID string) erro
 
 	_, err := db.ExecContext(ctx, `UPDATE queue_utxos SET published = true WHERE utxo_id = $1`, utxoID)
 	return err
+}
+
+func IsTransactionFailed(ctx context.Context, db *sql.DB, txID string) (bool, error) {
+
+	var failed bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM transactions WHERE tx_id = $1 AND status = $2)`, txID, model.FAILED).Scan(&failed)
+	return failed, err
 }
 
 func GetSpendingTransaction(ctx context.Context, db *sql.DB, outpoint model.Outpoint) (string, error) {
@@ -233,10 +242,20 @@ func GetTransaction(ctx context.Context, db *sql.DB, txID string) (*model.Transa
 	return scanTransaction(row)
 }
 
-func GetDueTransactions(ctx context.Context, db *sql.DB, now int64, limit int) ([]model.Transaction, error) {
+func ClaimDueTransactions(ctx context.Context, db *sql.DB, now int64, leaseUntil int64, limit int) ([]model.Transaction, error) {
 
-	rows, err := db.QueryContext(ctx, `SELECT `+transactionColumns+` FROM transactions WHERE status IN ($1, $2) AND next_attempt_at <= $3 ORDER BY seq LIMIT $4`,
-		model.PENDING, model.BROADCASTED, now, limit)
+	rows, err := db.QueryContext(ctx, `WITH due AS (
+			SELECT tx_id FROM transactions
+			WHERE status IN ($1, $2) AND next_attempt_at <= $3
+			ORDER BY seq LIMIT $4
+			FOR UPDATE SKIP LOCKED
+		), claimed AS (
+			UPDATE transactions SET next_attempt_at = $5 FROM due
+			WHERE transactions.tx_id = due.tx_id
+			RETURNING transactions.*
+		)
+		SELECT `+transactionColumns+` FROM claimed ORDER BY seq`,
+		model.PENDING, model.BROADCASTED, now, limit, leaseUntil)
 	if err != nil {
 		return nil, err
 	}
@@ -252,6 +271,13 @@ func GetDueTransactions(ctx context.Context, db *sql.DB, now int64, limit int) (
 	}
 
 	return transactions, rows.Err()
+}
+
+func ReleaseClaims(ctx context.Context, db *sql.DB, txIDs []string, nextAttemptAt int64) error {
+
+	_, err := db.ExecContext(ctx, `UPDATE transactions SET next_attempt_at = $1 WHERE tx_id = ANY($2) AND status IN ($3, $4)`,
+		nextAttemptAt, txIDs, model.PENDING, model.BROADCASTED)
+	return err
 }
 
 func MarkBroadcasted(ctx context.Context, db *sql.DB, txID string, now int64, nextAttemptAt int64) error {
@@ -282,9 +308,136 @@ func MarkSynced(ctx context.Context, db *sql.DB, txID string, blockHash string, 
 	return err
 }
 
-func MarkFailed(ctx context.Context, db *sql.DB, txID string, errMsg string) error {
+func MarkFailed(ctx context.Context, db *sql.DB, txID string, errMsg string) ([]string, error) {
 
-	_, err := db.ExecContext(ctx, `UPDATE transactions SET status = $1, last_error = $2, updated_at = now() WHERE tx_id = $3`,
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `UPDATE transactions SET status = $1, last_error = $2, updated_at = now() WHERE tx_id = $3`,
 		model.FAILED, errMsg, txID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.QueryContext(ctx, `WITH RECURSIVE descendants AS (
+			SELECT tx_id FROM tx_inputs WHERE prev_tx_id = $1
+			UNION
+			SELECT tx_inputs.tx_id FROM tx_inputs JOIN descendants ON tx_inputs.prev_tx_id = descendants.tx_id
+		)
+		UPDATE transactions SET status = $2, last_error = $3, updated_at = now()
+		WHERE tx_id IN (SELECT tx_id FROM descendants) AND status IN ($4, $5)
+		RETURNING tx_id`,
+		txID, model.FAILED, fmt.Sprintf("parent tx %s failed", txID), model.PENDING, model.BROADCASTED)
+	if err != nil {
+		return nil, err
+	}
+
+	cascaded := make([]string, 0)
+	for rows.Next() {
+		var descendant string
+		if err := rows.Scan(&descendant); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		cascaded = append(cascaded, descendant)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	failed := append([]string{txID}, cascaded...)
+	for _, failedTxID := range failed {
+		_, err = tx.ExecContext(ctx, `UPDATE funding_utxos SET is_spent = true WHERE tx_id = $1`, failedTxID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return cascaded, tx.Commit()
+}
+
+const (
+	RecoveryFee     = "fee"
+	RecoveryFunding = "funding"
+)
+
+type RecoveryCandidate struct {
+	Kind       string
+	Outpoint   model.Outpoint
+	FailedTxID string
+}
+
+func GetRecoveryCandidates(ctx context.Context, db *sql.DB, limit int) ([]RecoveryCandidate, error) {
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT $1::TEXT, queue_utxos.tx_id, queue_utxos.vout, tx_inputs.tx_id FROM queue_utxos
+		JOIN tx_inputs ON tx_inputs.prev_tx_id = queue_utxos.tx_id AND tx_inputs.vout = queue_utxos.vout
+		JOIN transactions spender ON spender.tx_id = tx_inputs.tx_id AND spender.status = $3
+		JOIN transactions creator ON creator.tx_id = queue_utxos.tx_id AND creator.status != $3
+		WHERE queue_utxos.chain_spent IS FALSE
+		UNION ALL
+		SELECT $2::TEXT, funding_utxos.tx_id, funding_utxos.vout, tx_inputs.tx_id FROM funding_utxos
+		JOIN tx_inputs ON tx_inputs.prev_tx_id = funding_utxos.tx_id AND tx_inputs.vout = funding_utxos.vout
+		JOIN transactions spender ON spender.tx_id = tx_inputs.tx_id AND spender.status = $3
+		LEFT JOIN transactions creator ON creator.tx_id = funding_utxos.tx_id
+		WHERE funding_utxos.chain_spent IS FALSE AND funding_utxos.is_spent IS TRUE AND (creator.status IS NULL OR creator.status != $3)
+		LIMIT $4`,
+		RecoveryFee, RecoveryFunding, model.FAILED, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	candidates := make([]RecoveryCandidate, 0)
+	for rows.Next() {
+		var candidate RecoveryCandidate
+		err := rows.Scan(&candidate.Kind, &candidate.Outpoint.TxID, &candidate.Outpoint.Vout, &candidate.FailedTxID)
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+
+	return candidates, rows.Err()
+}
+
+func RecoverUtxo(ctx context.Context, db *sql.DB, candidate RecoveryCandidate) (bool, error) {
+
+	restore := `UPDATE queue_utxos SET published = false`
+	table := "queue_utxos"
+	if candidate.Kind == RecoveryFunding {
+		restore = `UPDATE funding_utxos SET is_spent = false`
+		table = "funding_utxos"
+	}
+
+	result, err := db.ExecContext(ctx, `WITH released AS (
+			DELETE FROM tx_inputs WHERE prev_tx_id = $1 AND vout = $2 AND tx_id = $3 RETURNING 1
+		)
+		`+restore+` WHERE `+table+`.tx_id = $1 AND `+table+`.vout = $2 AND EXISTS (SELECT 1 FROM released)`,
+		candidate.Outpoint.TxID, candidate.Outpoint.Vout, candidate.FailedTxID)
+	if err != nil {
+		return false, err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+func MarkChainSpent(ctx context.Context, db *sql.DB, candidate RecoveryCandidate) error {
+
+	table := "queue_utxos"
+	if candidate.Kind == RecoveryFunding {
+		table = "funding_utxos"
+	}
+
+	_, err := db.ExecContext(ctx, `UPDATE `+table+` SET chain_spent = true WHERE tx_id = $1 AND vout = $2`,
+		candidate.Outpoint.TxID, candidate.Outpoint.Vout)
 	return err
 }

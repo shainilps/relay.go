@@ -12,35 +12,47 @@ import (
 	"github.com/shainilps/relay/internal/model"
 )
 
-type TaalArc struct {
-	token   string
-	taalUrl string
+type Arc struct {
+	name  string
+	url   string
+	token string
 }
 
 const (
-	TaalMainURL = "https://arc.taal.com/v1"
-	TaalTestURL = "https://arc-test.taal.com/v1"
+	TaalMainURL        = "https://arc.taal.com/v1"
+	TaalTestURL        = "https://arc-test.taal.com/v1"
+	GorillaPoolMainURL = "https://arc.gorillapool.io/v1"
 )
 
-func NewTaalArcProvider(network model.Network, token string) *TaalArc {
-	taalUrl := TaalMainURL
-	if network == model.TEST {
-		taalUrl = TaalTestURL
-	}
+func NewArc(name string, url string, token string) *Arc {
+	return &Arc{name: name, url: url, token: token}
+}
 
-	return &TaalArc{
-		token,
-		taalUrl,
+func NewTaalArcProvider(network model.Network, token string) *Arc {
+	url := TaalMainURL
+	if network == model.TEST {
+		url = TaalTestURL
+	}
+	return NewArc("taal", url, token)
+}
+
+func (t *Arc) Name() string {
+	return t.name
+}
+
+func (t *Arc) setAuth(req *http.Request) {
+	if t.token != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", t.token))
 	}
 }
 
-func (t *TaalArc) GetPolicy(ctx context.Context) (*PolicyResponse, error) {
-	url := fmt.Sprintf("%s/policy", t.taalUrl)
+func (t *Arc) GetPolicy(ctx context.Context) (*PolicyResponse, error) {
+	url := fmt.Sprintf("%s/policy", t.url)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", t.token))
+	t.setAuth(req)
 	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -52,7 +64,7 @@ func (t *TaalArc) GetPolicy(ctx context.Context) (*PolicyResponse, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GetPolicy: unexpected status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, &ArcError{StatusCode: resp.StatusCode, Body: string(bodyBytes)}
 	}
 
 	var pr PolicyResponse
@@ -62,14 +74,14 @@ func (t *TaalArc) GetPolicy(ctx context.Context) (*PolicyResponse, error) {
 	return &pr, nil
 }
 
-func (t *TaalArc) BroadcastTx(ctx context.Context, txHex string, headers map[string]string) (*BroadcastTxResponse, error) {
-	url := fmt.Sprintf("%s/tx", t.taalUrl)
+func (t *Arc) BroadcastTx(ctx context.Context, txHex string, headers map[string]string) (*BroadcastTxResponse, error) {
+	url := fmt.Sprintf("%s/tx", t.url)
 	body := bytes.NewBufferString(txHex)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", t.token))
+	t.setAuth(req)
 	req.Header.Set("Content-Type", "text/plain")
 	req.Header.Set("Accept", "application/json")
 	for k, v := range headers {
@@ -95,13 +107,13 @@ func (t *TaalArc) BroadcastTx(ctx context.Context, txHex string, headers map[str
 	return &br, nil
 }
 
-func (t *TaalArc) GetTxStatus(ctx context.Context, txid string) (*TxStatusResponse, error) {
-	url := fmt.Sprintf("%s/tx/%s", t.taalUrl, txid)
+func (t *Arc) GetTxStatus(ctx context.Context, txid string) (*TxStatusResponse, error) {
+	url := fmt.Sprintf("%s/tx/%s", t.url, txid)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", t.token))
+	t.setAuth(req)
 	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -123,13 +135,13 @@ func (t *TaalArc) GetTxStatus(ctx context.Context, txid string) (*TxStatusRespon
 	return &tr, nil
 }
 
-func (t *TaalArc) GetHealth(ctx context.Context) (*HealthResponse, error) {
-	url := fmt.Sprintf("%s/health", t.taalUrl)
+func (t *Arc) GetHealth(ctx context.Context) (*HealthResponse, error) {
+	url := fmt.Sprintf("%s/health", t.url)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", t.token))
+	t.setAuth(req)
 	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{Timeout: 5 * time.Second}

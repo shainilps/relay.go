@@ -3,6 +3,7 @@ package reservation
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -79,5 +80,29 @@ func TestReservationExpires(t *testing.T) {
 	}
 	if _, ok, err := store.Reserve(ctx, outpoint); err != nil || !ok {
 		t.Fatalf("expected the utxo to be reservable after expiry, got %v %v", ok, err)
+	}
+}
+
+func TestLockIsExclusiveUntilReleased(t *testing.T) {
+	ctx := context.Background()
+	store, server := newTestStore(t)
+
+	token, ok, err := store.AcquireLock(ctx, "funding", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("expected the lock, got %v %v", ok, err)
+	}
+	if _, ok, _ := store.AcquireLock(ctx, "funding", time.Minute); ok {
+		t.Fatal("expected a second acquire to fail")
+	}
+	if err := store.ReleaseLock(ctx, "funding", token); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := store.AcquireLock(ctx, "funding", time.Minute); !ok {
+		t.Fatal("expected the lock to be free after release")
+	}
+
+	server.FastForward(time.Minute)
+	if _, ok, _ := store.AcquireLock(ctx, "funding", time.Minute); !ok {
+		t.Fatal("expected an abandoned lock to expire")
 	}
 }

@@ -22,18 +22,24 @@ import (
 	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
 )
 
-const SAT_PER_KB = 100
 const DEFAULT_FUND_AMOUNT = 1
 const FUNDING_RETRY_INTERVAL = 30 * time.Second
 const DEFAULT_FUNDING_SCAN_INTERVAL = 5 * time.Minute
 const PARKED_CHECK_INTERVAL = time.Second
+const FUNDING_LOCK = "funding"
+const FUNDING_LOCK_TTL = 5 * time.Minute
+const FUNDING_LOCK_RETRY_INTERVAL = 5 * time.Second
 const INPUT_SIZE = 149 // this is can be 149 also because DER singature can be 32/33
 const OUTPUT_SIZE = 34
 
-var MIN_CHANGE = feeForSize(INPUT_SIZE)
-
 func (r *RelayService) StartEngine(ctx context.Context) {
+	if err := r.refreshFeeRate(ctx); err != nil {
+		rate := currentFeeRate()
+		log.Printf("warning: failed to load fee rate from arc policy, using %d sats per %d bytes: %v\n", rate.Satoshis, rate.Bytes, err)
+	}
+	go r.StartFeePolicy(ctx)
 	go r.watchParked(ctx)
+	go r.StartRecovery(ctx)
 	r.syncFundingUtxos(ctx)
 	go r.scanFundingUtxos(ctx)
 	r.ingestUtxos(ctx)
@@ -167,6 +173,9 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 	target := fundTarget()
 	startup := make(map[rabbitmq.QueueName]int)
 	for queuename, queue := range r.mq.Queues() {
+		if queue.Consumers > 0 {
+			continue
+		}
 		if missing := target - queue.Messages - pending[queuename]; missing > 0 {
 			startup[queuename] = missing
 		}
@@ -190,6 +199,12 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 			retry = nil
 		}
 
+		token, locked := r.acquireFundingLock(ctx)
+		if !locked {
+			retry = time.After(FUNDING_LOCK_RETRY_INTERVAL)
+			continue
+		}
+
 		deficit := r.takeDeficit()
 		if len(deficit) > 0 {
 			unfunded := r.fundQueues(ctx, deficit, fundingLockingScript, feeLockingScript)
@@ -204,6 +219,40 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 			retry = time.After(FUNDING_RETRY_INTERVAL)
 			log.Printf("warning: queue utxos left unpublished, retrying in %s\n", FUNDING_RETRY_INTERVAL)
 		}
+
+		r.releaseFundingLock(token)
+	}
+}
+
+func (r *RelayService) acquireFundingLock(ctx context.Context) (string, bool) {
+	if r.reservations == nil {
+		return "", true
+	}
+
+	lockctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	token, ok, err := r.reservations.AcquireLock(lockctx, FUNDING_LOCK, FUNDING_LOCK_TTL)
+	if err != nil {
+		log.Printf("warning: failed to take the funding lock, funding without it: %v\n", err)
+		return "", true
+	}
+	if !ok {
+		log.Printf("funding lock is held by another instance, retrying in %s\n", FUNDING_LOCK_RETRY_INTERVAL)
+	}
+	return token, ok
+}
+
+func (r *RelayService) releaseFundingLock(token string) {
+	if r.reservations == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := r.reservations.ReleaseLock(ctx, FUNDING_LOCK, token); err != nil {
+		log.Printf("warning: failed to release the funding lock, it expires in %s: %v\n", FUNDING_LOCK_TTL, err)
 	}
 }
 
@@ -231,7 +280,7 @@ func planChange(inputAmount uint64, outputAmount uint64, inputCount int, outputC
 	}
 
 	feeWithChange := feeForSize(p2pkhTxSize(inputCount, outputCount+1))
-	if inputAmount < outputAmount+feeWithChange+MIN_CHANGE {
+	if inputAmount < outputAmount+feeWithChange+minChange() {
 		return 0, inputAmount - outputAmount, true
 	}
 
@@ -473,16 +522,14 @@ func (r *RelayService) takeUtxo(ctx context.Context, queuename rabbitmq.QueueNam
 			}
 			outpoint := model.Outpoint{TxID: utxo.TxID, Vout: utxo.Vout}
 
-			dbctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			spentBy, err := repo.GetSpendingTransaction(dbctx, r.db, outpoint)
-			cancel()
+			usable, reason, err := r.feeUtxoUsable(ctx, outpoint)
 			if err != nil {
 				NackDeliveries([]amqp.Delivery{message})
 				return heldUtxo{}, model.UTXO{}, err
 			}
 
-			if spentBy != "" {
-				log.Printf("warning: dropping utxo %s from queue %s, already spent by tx %s\n", utxo.UtxoID, queuename, spentBy)
+			if !usable {
+				log.Printf("warning: dropping utxo %s from queue %s, %s\n", utxo.UtxoID, queuename, reason)
 				r.AckDeliveries([]amqp.Delivery{message})
 				continue
 			}
@@ -504,6 +551,29 @@ func (r *RelayService) takeUtxo(ctx context.Context, queuename rabbitmq.QueueNam
 			return heldUtxo{delivery: message, outpoint: outpoint, token: token}, utxo, nil
 		}
 	}
+}
+
+func (r *RelayService) feeUtxoUsable(ctx context.Context, outpoint model.Outpoint) (bool, string, error) {
+	dbctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	spentBy, err := repo.GetSpendingTransaction(dbctx, r.db, outpoint)
+	if err != nil {
+		return false, "", err
+	}
+	if spentBy != "" {
+		return false, fmt.Sprintf("already spent by tx %s", spentBy), nil
+	}
+
+	parentFailed, err := repo.IsTransactionFailed(dbctx, r.db, outpoint.TxID)
+	if err != nil {
+		return false, "", err
+	}
+	if parentFailed {
+		return false, fmt.Sprintf("its funding tx %s failed", outpoint.TxID), nil
+	}
+
+	return true, "", nil
 }
 
 func (r *RelayService) commitHeld(held []heldUtxo) {
@@ -571,15 +641,13 @@ func (r *RelayService) resolveParked(ctx context.Context) {
 			continue
 		}
 
-		dbctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		spentBy, err := repo.GetSpendingTransaction(dbctx, r.db, p.outpoint)
-		cancel()
+		usable, _, err := r.feeUtxoUsable(ctx, p.outpoint)
 		if err != nil {
 			keep = append(keep, p)
 			continue
 		}
 
-		if spentBy != "" {
+		if !usable {
 			r.AckDeliveries([]amqp.Delivery{p.delivery})
 			continue
 		}

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -28,6 +29,8 @@ type Reservations interface {
 	Reserve(ctx context.Context, outpoint model.Outpoint) (string, bool, error)
 	Release(ctx context.Context, outpoint model.Outpoint, token string) error
 	IsReserved(ctx context.Context, outpoint model.Outpoint) (bool, error)
+	AcquireLock(ctx context.Context, name string, ttl time.Duration) (string, bool, error)
+	ReleaseLock(ctx context.Context, name string, token string) error
 }
 
 type heldUtxo struct {
@@ -173,6 +176,23 @@ func (s *RelayService) broadcastStored(ctx context.Context, stored *model.Transa
 	dbctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return repo.GetTransaction(dbctx, s.db, stored.TxID)
+}
+
+var ErrTransactionNotFound = errors.New("transaction not found")
+
+func (s *RelayService) GetTransaction(ctx context.Context, txID string) (*model.Transaction, error) {
+	if len(txID) != 64 {
+		return nil, fmt.Errorf("%w: txid must be 64 hex characters", ErrInvalidTransaction)
+	}
+	if _, err := hex.DecodeString(txID); err != nil {
+		return nil, fmt.Errorf("%w: txid must be 64 hex characters", ErrInvalidTransaction)
+	}
+
+	tx, err := repo.GetTransaction(ctx, s.db, txID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrTransactionNotFound
+	}
+	return tx, err
 }
 
 func (s *RelayService) GetFundingAddress() (string, error) {

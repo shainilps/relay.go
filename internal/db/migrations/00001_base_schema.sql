@@ -35,6 +35,7 @@ CREATE TABLE funding_utxos(
     vout BIGINT NOT NULL,
     amount BIGINT NOT NULL,
     is_spent BOOLEAN NOT NULL DEFAULT FALSE,
+    chain_spent BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -46,6 +47,7 @@ CREATE TABLE queue_utxos(
     amount BIGINT NOT NULL,
     queue TEXT NOT NULL,
     published BOOLEAN NOT NULL DEFAULT FALSE,
+    chain_spent BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (tx_id, vout)
 );

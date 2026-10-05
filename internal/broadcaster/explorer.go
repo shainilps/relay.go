@@ -17,12 +17,18 @@ const (
 )
 
 type WOCExplorer struct {
+	baseURL string
 	network model.Network
 	token   string
 }
 
 func NewWOCExplorerProvider(network model.Network, token string) *WOCExplorer {
+	return NewWOCExplorer(WOCURL, network, token)
+}
+
+func NewWOCExplorer(baseURL string, network model.Network, token string) *WOCExplorer {
 	return &WOCExplorer{
+		baseURL: baseURL,
 		network: network,
 		token:   token,
 	}
@@ -35,7 +41,7 @@ func (w *WOCExplorer) GetUtxosForAddress(ctx context.Context, address string) (*
 	}
 
 	// GET https://api.whatsonchain.com/v1/bsv/<network>/address/<address>/unspent/all
-	url := fmt.Sprintf("%s/%s/address/%s/unspent/all", WOCURL, strings.ToLower(string(w.network)), address)
+	url := fmt.Sprintf("%s/%s/address/%s/unspent/all", w.baseURL, strings.ToLower(string(w.network)), address)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -69,4 +75,50 @@ func (w *WOCExplorer) GetUtxosForAddress(ctx context.Context, address string) (*
 	}
 
 	return &result, nil
+}
+
+type OutputSpentStatus int
+
+const (
+	OutputUnspent OutputSpentStatus = iota
+	OutputSpent
+	OutputUnknown
+)
+
+func (w *WOCExplorer) GetOutputSpent(ctx context.Context, txid string, vout uint32) (OutputSpentStatus, string, error) {
+
+	url := fmt.Sprintf("%s/%s/tx/%s/%d/spent", w.baseURL, strings.ToLower(string(w.network)), txid, vout)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return OutputUnknown, "", err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return OutputUnknown, "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return OutputUnknown, "", err
+	}
+
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		return OutputUnspent, "", nil
+	case http.StatusBadRequest:
+		return OutputUnknown, "", nil
+	case http.StatusOK:
+		var spent WOCSpentResponse
+		if err := json.Unmarshal(body, &spent); err != nil {
+			return OutputUnknown, "", err
+		}
+		return OutputSpent, spent.TxID, nil
+	default:
+		return OutputUnknown, "", fmt.Errorf("GetOutputSpent: unexpected status %d: %s", resp.StatusCode, string(body))
+	}
 }

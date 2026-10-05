@@ -63,13 +63,13 @@ func newToken() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-func (s *Store) Reserve(ctx context.Context, outpoint model.Outpoint) (string, bool, error) {
+func (s *Store) acquire(ctx context.Context, key string, ttl time.Duration) (string, bool, error) {
 	token, err := newToken()
 	if err != nil {
 		return "", false, err
 	}
 
-	ok, err := s.client.SetNX(ctx, key(outpoint), token, TTL).Result()
+	ok, err := s.client.SetNX(ctx, key, token, ttl).Result()
 	if err != nil {
 		return "", false, err
 	}
@@ -80,11 +80,27 @@ func (s *Store) Reserve(ctx context.Context, outpoint model.Outpoint) (string, b
 	return token, true, nil
 }
 
-func (s *Store) Release(ctx context.Context, outpoint model.Outpoint, token string) error {
+func (s *Store) release(ctx context.Context, key string, token string) error {
 	if token == "" {
 		return nil
 	}
-	return releaseScript.Run(ctx, s.client, []string{key(outpoint)}, token).Err()
+	return releaseScript.Run(ctx, s.client, []string{key}, token).Err()
+}
+
+func (s *Store) Reserve(ctx context.Context, outpoint model.Outpoint) (string, bool, error) {
+	return s.acquire(ctx, key(outpoint), TTL)
+}
+
+func (s *Store) Release(ctx context.Context, outpoint model.Outpoint, token string) error {
+	return s.release(ctx, key(outpoint), token)
+}
+
+func (s *Store) AcquireLock(ctx context.Context, name string, ttl time.Duration) (string, bool, error) {
+	return s.acquire(ctx, "relay:lock:"+name, ttl)
+}
+
+func (s *Store) ReleaseLock(ctx context.Context, name string, token string) error {
+	return s.release(ctx, "relay:lock:"+name, token)
 }
 
 func (s *Store) IsReserved(ctx context.Context, outpoint model.Outpoint) (bool, error) {

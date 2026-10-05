@@ -59,6 +59,7 @@ func main() {
 	mux.HandleFunc("/broadcast", handler.Broadcast)
 	mux.HandleFunc("/fund-and-broadcast", handler.FundAndBroadcast)
 	mux.HandleFunc("/funding-address", handler.GetFundingAddress)
+	mux.HandleFunc("/tx", handler.GetTransaction)
 
 	server := http.Server{
 		Addr:    viper.GetString("app.addr"),

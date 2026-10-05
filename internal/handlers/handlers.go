@@ -22,6 +22,8 @@ func errorStatus(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, services.ErrOutOfFee):
 		return http.StatusServiceUnavailable
+	case errors.Is(err, services.ErrTransactionNotFound):
+		return http.StatusNotFound
 	default:
 		return http.StatusInternalServerError
 	}
@@ -61,6 +63,20 @@ func (h *Handler) FundAndBroadcast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp, err := h.service.FundAndBroadcast(r.Context(), req.TxHex)
+	if err != nil {
+		http.Error(w, err.Error(), errorStatus(err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	resp, err := h.service.GetTransaction(r.Context(), r.URL.Query().Get("txid"))
 	if err != nil {
 		http.Error(w, err.Error(), errorStatus(err))
 		return

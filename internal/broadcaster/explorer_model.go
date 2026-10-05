@@ -14,3 +14,9 @@ type WOCUtxoResponse struct {
 	Result  []WOCUtxo `json:"result"`
 	Error   string    `json:"error"`
 }
+
+type WOCSpentResponse struct {
+	TxID   string `json:"txid"`
+	Vin    uint32 `json:"vin"`
+	Status string `json:"status"`
+}

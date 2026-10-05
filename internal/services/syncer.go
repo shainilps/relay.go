@@ -20,6 +20,8 @@ const (
 	DEFAULT_SYNC_BATCH_SIZE      = 50
 
 	ARC_STATUS_MINED = "MINED"
+
+	SYNC_CLAIM_LEASE = 10 * time.Minute
 )
 
 type SyncConfig struct {
@@ -102,6 +104,18 @@ func (r *RelayService) attemptBroadcast(ctx context.Context, tx *model.Transacti
 	return false, repo.MarkBroadcasted(dbctx, r.db, tx.TxID, now.Unix(), nextAttemptAt)
 }
 
+func (r *RelayService) markFailed(ctx context.Context, txID string, errMsg string) error {
+	log.Printf("critical: tx %s failed: %s\n", txID, errMsg)
+	cascaded, err := repo.MarkFailed(ctx, r.db, txID, errMsg)
+	if err != nil {
+		return err
+	}
+	if len(cascaded) > 0 {
+		log.Printf("critical: failed %d txs chained off %s: %v\n", len(cascaded), txID, cascaded)
+	}
+	return nil
+}
+
 func (r *RelayService) StartSyncer(ctx context.Context) {
 	ticker := time.NewTicker(r.syncConfig.PollInterval)
 	defer ticker.Stop()
@@ -118,16 +132,18 @@ func (r *RelayService) StartSyncer(ctx context.Context) {
 }
 
 func (r *RelayService) syncDue(ctx context.Context) {
+	now := time.Now()
 	dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	transactions, err := repo.GetDueTransactions(dbctx, r.db, time.Now().Unix(), r.syncConfig.BatchSize)
+	transactions, err := repo.ClaimDueTransactions(dbctx, r.db, now.Unix(), now.Add(SYNC_CLAIM_LEASE).Unix(), r.syncConfig.BatchSize)
 	cancel()
 	if err != nil {
-		log.Printf("critical: failed to fetch due transactions: %v\n", err)
+		log.Printf("critical: failed to claim due transactions: %v\n", err)
 		return
 	}
 
 	for i := range transactions {
 		if ctx.Err() != nil {
+			r.releaseClaims(transactions[i:])
 			return
 		}
 		arcDown, err := r.syncTransaction(ctx, &transactions[i])
@@ -136,8 +152,22 @@ func (r *RelayService) syncDue(ctx context.Context) {
 		}
 		if arcDown {
 			log.Println("warning: arc unreachable, pausing sync until the next poll")
+			r.releaseClaims(transactions[i:])
 			return
 		}
+	}
+}
+
+func (r *RelayService) releaseClaims(transactions []model.Transaction) {
+	txIDs := make([]string, 0, len(transactions))
+	for _, tx := range transactions {
+		txIDs = append(txIDs, tx.TxID)
+	}
+
+	dbctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := repo.ReleaseClaims(dbctx, r.db, txIDs, time.Now().Unix()); err != nil {
+		log.Printf("warning: failed to release claimed transactions, they retry after %s: %v\n", SYNC_CLAIM_LEASE, err)
 	}
 }
 
@@ -182,16 +212,14 @@ func (r *RelayService) syncTransaction(ctx context.Context, tx *model.Transactio
 		if tx.LastError != "" {
 			errMsg = fmt.Sprintf("%s, last error: %s", errMsg, tx.LastError)
 		}
-		log.Printf("critical: tx %s failed: %s\n", tx.TxID, errMsg)
-		return false, repo.MarkFailed(dbctx, r.db, tx.TxID, errMsg)
+		return false, r.markFailed(dbctx, tx.TxID, errMsg)
 
 	case actionMarkFailed:
 		errMsg := fmt.Sprintf("not mined after %d broadcast attempts", tx.Attempts)
 		if tx.LastError != "" {
 			errMsg = fmt.Sprintf("%s, last error: %s", errMsg, tx.LastError)
 		}
-		log.Printf("critical: tx %s failed: %s\n", tx.TxID, errMsg)
-		return false, repo.MarkFailed(dbctx, r.db, tx.TxID, errMsg)
+		return false, r.markFailed(dbctx, tx.TxID, errMsg)
 
 	default:
 		return r.attemptBroadcast(ctx, tx)

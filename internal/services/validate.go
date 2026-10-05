@@ -15,10 +15,6 @@ var ErrOutOfFee = errors.New("out of fee")
 
 var engine = interpreter.NewEngine()
 
-func feeForSize(size int) uint64 {
-	return (uint64(size)*SAT_PER_KB + 999) / 1000 //+999 does the ceil operation for us
-}
-
 func hasAllSources(tx *transaction.Transaction) bool {
 	for _, input := range tx.Inputs {
 		if input.SourceTxOutput() == nil {

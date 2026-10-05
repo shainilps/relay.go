@@ -6,14 +6,25 @@ import (
 )
 
 type Broadcaster struct {
-	Arc      *TaalArc
+	Arc      *ArcPool
 	Explorer *WOCExplorer
 }
 
 func NewBroadcaster() *Broadcaster {
-	return &Broadcaster{
-		Arc:      NewTaalArcProvider(model.Network(viper.GetString("app.network")), viper.GetString("arc.token")),
-		Explorer: NewWOCExplorerProvider(model.Network(viper.GetString("app.network")), viper.GetString("explorer.token")),
+	network := model.Network(viper.GetString("app.network"))
+
+	providers := []*Arc{NewTaalArcProvider(network, viper.GetString("arc.token"))}
+
+	fallbackURL := viper.GetString("arc.fallback_url")
+	if fallbackURL == "" && network == model.MAIN {
+		fallbackURL = GorillaPoolMainURL
+	}
+	if fallbackURL != "" {
+		providers = append(providers, NewArc("fallback", fallbackURL, viper.GetString("arc.fallback_token")))
 	}
 
+	return &Broadcaster{
+		Arc:      NewArcPool(providers...),
+		Explorer: NewWOCExplorerProvider(network, viper.GetString("woc.token")),
+	}
 }
