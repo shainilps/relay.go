@@ -3,13 +3,15 @@ package services
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/shainilps/relay/internal/broadcaster"
 	"github.com/shainilps/relay/internal/db/repo"
 	"github.com/shainilps/relay/internal/model"
+	"github.com/shainilps/relay/internal/telemetry"
 	"github.com/spf13/viper"
+	"go.opentelemetry.io/otel/attribute"
+	"go.uber.org/zap"
 )
 
 const (
@@ -80,7 +82,13 @@ func decide(tx *model.Transaction, mined bool, expired bool, maxAttempts int) sy
 	return actionBroadcast
 }
 
-func (r *RelayService) attemptBroadcast(ctx context.Context, tx *model.Transaction) (bool, error) {
+func (r *RelayService) attemptBroadcast(ctx context.Context, tx *model.Transaction) (arcDown bool, err error) {
+	ctx, span := telemetry.Start(ctx, "arc_broadcast", attribute.String("txid", tx.TxID), attribute.Int("attempt", tx.Attempts+1))
+	defer func() {
+		span.SetAttributes(attribute.Bool("arc_unreachable", arcDown))
+		telemetry.End(span, err)
+	}()
+
 	broadcastctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	_, broadcastErr := r.broadcaster.Arc.BroadcastTx(broadcastctx, tx.TxHex, nil)
 	cancel()
@@ -92,26 +100,28 @@ func (r *RelayService) attemptBroadcast(ctx context.Context, tx *model.Transacti
 	defer cancel()
 
 	if broadcaster.IsUnreachable(broadcastErr) {
-		log.Printf("warning: arc unreachable while broadcasting tx %s, not counted as an attempt: %v\n", tx.TxID, broadcastErr)
+		telemetry.Log(ctx).Warn("arc unreachable, broadcast not counted as an attempt", zap.String("txid", tx.TxID), zap.Error(broadcastErr))
 		return true, repo.RecordUnreachable(dbctx, r.db, tx.TxID, broadcastErr.Error(), now.Unix())
 	}
 
 	if broadcastErr != nil {
-		log.Printf("warning: broadcast attempt %d for tx %s rejected: %v\n", tx.Attempts+1, tx.TxID, broadcastErr)
+		telemetry.Log(ctx).Warn("broadcast rejected", zap.String("txid", tx.TxID), zap.Int("attempt", tx.Attempts+1), zap.Error(broadcastErr))
 		return false, repo.RecordBroadcastError(dbctx, r.db, tx.TxID, broadcastErr.Error(), nextAttemptAt)
 	}
 
 	return false, repo.MarkBroadcasted(dbctx, r.db, tx.TxID, now.Unix(), nextAttemptAt)
 }
 
-func (r *RelayService) markFailed(ctx context.Context, txID string, errMsg string) error {
-	log.Printf("critical: tx %s failed: %s\n", txID, errMsg)
+func (r *RelayService) markFailed(ctx context.Context, txID string, reason string, errMsg string) error {
+	telemetry.Log(ctx).Error("tx failed", zap.String("txid", txID), zap.String("reason", errMsg))
 	cascaded, err := repo.MarkFailed(ctx, r.db, txID, errMsg)
 	if err != nil {
 		return err
 	}
+	telemetry.Count(ctx, telemetry.Metrics.TxSettled, attribute.String("status", "failed"), attribute.String("reason", reason))
+	telemetry.CountN(ctx, telemetry.Metrics.TxSettled, int64(len(cascaded)), attribute.String("status", "failed"), attribute.String("reason", "parent_failed"))
 	if len(cascaded) > 0 {
-		log.Printf("critical: failed %d txs chained off %s: %v\n", len(cascaded), txID, cascaded)
+		telemetry.Log(ctx).Error("failed txs chained off a failed tx", zap.String("txid", txID), zap.Strings("cascaded", cascaded))
 	}
 	return nil
 }
@@ -137,7 +147,7 @@ func (r *RelayService) syncDue(ctx context.Context) {
 	transactions, err := repo.ClaimDueTransactions(dbctx, r.db, now.Unix(), now.Add(SYNC_CLAIM_LEASE).Unix(), r.syncConfig.BatchSize)
 	cancel()
 	if err != nil {
-		log.Printf("critical: failed to claim due transactions: %v\n", err)
+		telemetry.Log(ctx).Error("failed to claim due transactions", zap.Error(err))
 		return
 	}
 
@@ -148,10 +158,10 @@ func (r *RelayService) syncDue(ctx context.Context) {
 		}
 		arcDown, err := r.syncTransaction(ctx, &transactions[i])
 		if err != nil {
-			log.Printf("critical: failed to sync tx %s: %v\n", transactions[i].TxID, err)
+			telemetry.Log(ctx).Error("failed to sync tx", zap.String("txid", transactions[i].TxID), zap.Error(err))
 		}
 		if arcDown {
-			log.Println("warning: arc unreachable, pausing sync until the next poll")
+			telemetry.Log(ctx).Warn("arc unreachable, pausing sync until the next poll")
 			r.releaseClaims(transactions[i:])
 			return
 		}
@@ -167,7 +177,7 @@ func (r *RelayService) releaseClaims(transactions []model.Transaction) {
 	dbctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := repo.ReleaseClaims(dbctx, r.db, txIDs, time.Now().Unix()); err != nil {
-		log.Printf("warning: failed to release claimed transactions, they retry after %s: %v\n", SYNC_CLAIM_LEASE, err)
+		zap.L().Warn("failed to release claimed transactions", zap.Duration("retry_after", SYNC_CLAIM_LEASE), zap.Error(err))
 	}
 }
 
@@ -175,7 +185,10 @@ func (r *RelayService) isExpired(tx *model.Transaction, now time.Time) bool {
 	return now.Sub(time.Unix(tx.CreatedAt, 0)) >= r.syncConfig.MaxAge
 }
 
-func (r *RelayService) syncTransaction(ctx context.Context, tx *model.Transaction) (bool, error) {
+func (r *RelayService) syncTransaction(ctx context.Context, tx *model.Transaction) (arcDown bool, err error) {
+	ctx, span := telemetry.Start(ctx, "sync_tx", attribute.String("txid", tx.TxID), attribute.Int("attempts", tx.Attempts))
+	defer func() { telemetry.End(span, err) }()
+
 	expired := r.isExpired(tx, time.Now())
 	mined := false
 	var blockHash string
@@ -195,7 +208,7 @@ func (r *RelayService) syncTransaction(ctx context.Context, tx *model.Transactio
 		case broadcaster.IsUnreachable(err) && !expired:
 			return true, nil
 		default:
-			log.Printf("warning: failed to get status of tx %s: %v\n", tx.TxID, err)
+			telemetry.Log(ctx).Warn("failed to get tx status", zap.String("txid", tx.TxID), zap.Error(err))
 		}
 	}
 
@@ -204,22 +217,29 @@ func (r *RelayService) syncTransaction(ctx context.Context, tx *model.Transactio
 
 	switch decide(tx, mined, expired, r.syncConfig.MaxAttempts) {
 	case actionMarkSynced:
-		log.Printf("tx %s mined in block %d\n", tx.TxID, blockHeight)
-		return false, repo.MarkSynced(dbctx, r.db, tx.TxID, blockHash, blockHeight)
+		telemetry.Log(ctx).Info("tx mined", zap.String("txid", tx.TxID), zap.Uint64("block_height", blockHeight))
+		if err := repo.MarkSynced(dbctx, r.db, tx.TxID, blockHash, blockHeight); err != nil {
+			return false, err
+		}
+		telemetry.Count(ctx, telemetry.Metrics.TxSettled, attribute.String("status", "synced"), attribute.String("reason", "mined"))
+		if r := telemetry.Metrics.TxTimeToMined; r != nil {
+			r.Record(ctx, time.Since(time.Unix(tx.CreatedAt, 0)).Seconds())
+		}
+		return false, nil
 
 	case actionMarkExpired:
 		errMsg := fmt.Sprintf("expired after %s without being mined", r.syncConfig.MaxAge)
 		if tx.LastError != "" {
 			errMsg = fmt.Sprintf("%s, last error: %s", errMsg, tx.LastError)
 		}
-		return false, r.markFailed(dbctx, tx.TxID, errMsg)
+		return false, r.markFailed(dbctx, tx.TxID, "expired", errMsg)
 
 	case actionMarkFailed:
 		errMsg := fmt.Sprintf("not mined after %d broadcast attempts", tx.Attempts)
 		if tx.LastError != "" {
 			errMsg = fmt.Sprintf("%s, last error: %s", errMsg, tx.LastError)
 		}
-		return false, r.markFailed(dbctx, tx.TxID, errMsg)
+		return false, r.markFailed(dbctx, tx.TxID, "max_attempts", errMsg)
 
 	default:
 		return r.attemptBroadcast(ctx, tx)

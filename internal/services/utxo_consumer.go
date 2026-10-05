@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/bsv-blockchain/go-sdk/script"
@@ -20,6 +19,9 @@ import (
 	"github.com/spf13/viper"
 
 	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
+	"github.com/shainilps/relay/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.uber.org/zap"
 )
 
 const DEFAULT_FUND_AMOUNT = 1
@@ -36,7 +38,7 @@ const OUTPUT_SIZE = 34
 func (r *RelayService) StartEngine(ctx context.Context) {
 	if err := r.refreshFeeRate(ctx); err != nil {
 		rate := currentFeeRate()
-		log.Printf("warning: failed to load fee rate from arc policy, using %d sats per %d bytes: %v\n", rate.Satoshis, rate.Bytes, err)
+		telemetry.Log(ctx).Warn("failed to load fee rate from arc policy, using the default", zap.Uint64("satoshis", rate.Satoshis), zap.Uint64("bytes", rate.Bytes), zap.Error(err))
 	}
 	go r.StartFeePolicy(ctx)
 	go r.watchParked(ctx)
@@ -72,7 +74,7 @@ func (r *RelayService) scanFundingUtxos(ctx context.Context) {
 func (r *RelayService) syncFundingUtxos(ctx context.Context) {
 	address, err := keymanager.KeyManager.GetAddress()
 	if err != nil {
-		log.Printf("critical: failed to fetch funding address from key manager: %v\n", err)
+		telemetry.Log(ctx).Error("failed to fetch funding address from key manager", zap.Error(err))
 		return
 	}
 
@@ -80,7 +82,7 @@ func (r *RelayService) syncFundingUtxos(ctx context.Context) {
 	utxosets, err := r.broadcaster.Explorer.GetUtxosForAddress(reqctx, address.AddressString)
 	cancel()
 	if err != nil {
-		log.Printf("warning: failed to fetch funding utxos for %s: %v\n", address.AddressString, err)
+		telemetry.Log(ctx).Warn("failed to fetch funding utxos", zap.String("address", address.AddressString), zap.Error(err))
 		return
 	}
 
@@ -103,7 +105,7 @@ func (r *RelayService) syncFundingUtxos(ctx context.Context) {
 	err = repo.CreateFundingUTXOsIfNotExists(dbctx, r.db, fundingUtxo)
 	cancel()
 	if err != nil {
-		log.Printf("warning: failed to insert funding utxos: %v\n", err)
+		telemetry.Log(ctx).Warn("failed to insert funding utxos", zap.Error(err))
 	}
 }
 
@@ -142,29 +144,29 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 
 	address, err := keymanager.KeyManager.GetAddress()
 	if err != nil {
-		log.Fatalf("critical: failed to fetch the address form the key manager: %v", err)
+		zap.L().Fatal("failed to fetch the funding address from the key manager", zap.Error(err))
 	}
 
 	fundingLockingScript, err := p2pkh.Lock(address)
 	if err != nil {
-		log.Fatalf("critical: faile to construct the lokcing script from addres: %v\n", err.Error())
+		zap.L().Fatal("failed to build the funding locking script", zap.Error(err))
 	}
 
 	feeAddress, err := keymanager.KeyManager.GetFeeAddress()
 	if err != nil {
-		log.Fatalf("critical: failed to fetch the fee address form the key manager: %v", err)
+		zap.L().Fatal("failed to fetch the fee address from the key manager", zap.Error(err))
 	}
 
 	feeLockingScript, err := p2pkh.Lock(feeAddress)
 	if err != nil {
-		log.Fatalf("critical: failed to construct the fee locking script: %v\n", err)
+		zap.L().Fatal("failed to build the fee locking script", zap.Error(err))
 	}
 
 	dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	unpublished, err := repo.GetUnpublishedQueueUTXOs(dbctx, r.db)
 	cancel()
 	if err != nil {
-		log.Fatalf("critical: failed to load unpublished queue utxos: %v", err)
+		zap.L().Fatal("failed to load unpublished queue utxos", zap.Error(err))
 	}
 	pending := make(map[rabbitmq.QueueName]int)
 	for _, utxo := range unpublished {
@@ -181,7 +183,7 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 			startup[queuename] = missing
 		}
 	}
-	log.Printf("startup funding deficit: %v, unpublished: %v\n", startup, pending)
+	telemetry.Log(ctx).Info("startup funding deficit", zap.Any("deficit", startup), zap.Any("unpublished", pending))
 	r.recordDeficit(startup)
 	r.signalFunding()
 
@@ -202,6 +204,7 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 
 		token, locked := r.acquireFundingLock(ctx)
 		if !locked {
+			telemetry.Count(ctx, telemetry.Metrics.FundingRounds, attribute.String("result", "lock_busy"))
 			retry = time.After(FUNDING_LOCK_RETRY_INTERVAL)
 			continue
 		}
@@ -212,13 +215,13 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 			if len(unfunded) > 0 {
 				r.recordDeficit(unfunded)
 				retry = time.After(FUNDING_RETRY_INTERVAL)
-				log.Printf("warning: unfunded queues %v, retrying in %s\n", unfunded, FUNDING_RETRY_INTERVAL)
+				telemetry.Log(ctx).Warn("queues left unfunded, retrying", zap.Any("unfunded", unfunded), zap.Duration("retry_in", FUNDING_RETRY_INTERVAL))
 			}
 		}
 
 		if !r.publishPending(ctx) && retry == nil {
 			retry = time.After(FUNDING_RETRY_INTERVAL)
-			log.Printf("warning: queue utxos left unpublished, retrying in %s\n", FUNDING_RETRY_INTERVAL)
+			telemetry.Log(ctx).Warn("queue utxos left unpublished, retrying", zap.Duration("retry_in", FUNDING_RETRY_INTERVAL))
 		}
 
 		r.releaseFundingLock(token)
@@ -235,11 +238,11 @@ func (r *RelayService) acquireFundingLock(ctx context.Context) (string, bool) {
 
 	token, ok, err := r.reservations.AcquireLock(lockctx, FUNDING_LOCK, FUNDING_LOCK_TTL)
 	if err != nil {
-		log.Printf("warning: failed to take the funding lock, funding without it: %v\n", err)
+		telemetry.Log(ctx).Warn("failed to take the funding lock, funding without it", zap.Error(err))
 		return "", true
 	}
 	if !ok {
-		log.Printf("funding lock is held by another instance, retrying in %s\n", FUNDING_LOCK_RETRY_INTERVAL)
+		telemetry.Log(ctx).Info("funding lock is held by another instance", zap.Duration("retry_in", FUNDING_LOCK_RETRY_INTERVAL))
 	}
 	return token, ok
 }
@@ -253,7 +256,7 @@ func (r *RelayService) releaseFundingLock(token string) {
 	defer cancel()
 
 	if err := r.reservations.ReleaseLock(ctx, FUNDING_LOCK, token); err != nil {
-		log.Printf("warning: failed to release the funding lock, it expires in %s: %v\n", FUNDING_LOCK_TTL, err)
+		zap.L().Warn("failed to release the funding lock", zap.Duration("expires_in", FUNDING_LOCK_TTL), zap.Error(err))
 	}
 }
 
@@ -288,18 +291,28 @@ func planChange(inputAmount uint64, outputAmount uint64, inputCount int, outputC
 	return inputAmount - outputAmount - feeWithChange, feeWithChange, true
 }
 
-func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.QueueName]int, fundingLockingScript *script.Script, feeLockingScript *script.Script) map[rabbitmq.QueueName]int {
+func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.QueueName]int, fundingLockingScript *script.Script, feeLockingScript *script.Script) (unfunded map[rabbitmq.QueueName]int) {
+	ctx, span := telemetry.Start(ctx, "fund_queues")
+	defer func() {
+		result := "funded"
+		if len(unfunded) > 0 {
+			result = "failed"
+		}
+		span.SetAttributes(attribute.String("result", result))
+		telemetry.Count(ctx, telemetry.Metrics.FundingRounds, attribute.String("result", result))
+		span.End()
+	}()
 
 	dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	unxpentUtxos, err := repo.GetAllUnspentFundingUTXOs(dbctx, r.db)
 	cancel()
 	if err != nil {
-		log.Printf("critical: failed to fetch funding utxo from db: %v\n", err)
+		telemetry.Log(ctx).Error("failed to fetch funding utxos from db", zap.Error(err))
 		return deficit
 	}
 
 	if len(unxpentUtxos) == 0 {
-		log.Println("warning: db is out of funding utxos")
+		telemetry.Log(ctx).Warn("out of funding utxos")
 		return deficit
 	}
 
@@ -308,7 +321,7 @@ func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.Queu
 	sgh := sighash.AllForkID
 	unlockingTemplate, err := p2pkh.Unlock(keymanager.KeyManager.GetPrivateKey(), &sgh)
 	if err != nil {
-		log.Printf("critical: failed to contstruct unlockingscript: %v\n", err.Error())
+		telemetry.Log(ctx).Error("failed to build the funding unlocking script", zap.Error(err))
 		return deficit
 	}
 
@@ -316,7 +329,7 @@ func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.Queu
 	for _, utxo := range unxpentUtxos {
 		err = tx.AddInputFrom(utxo.TxID, utxo.Vout, hex.EncodeToString(fundingLockingScript.Bytes()), utxo.Amount, unlockingTemplate)
 		if err != nil {
-			log.Printf("critical: failed to add utxo to transaction: %v\n", err.Error())
+			telemetry.Log(ctx).Error("failed to add funding utxo to transaction", zap.String("utxo", utxo.UtxoID), zap.Error(err))
 		}
 		inputAmount += utxo.Amount
 	}
@@ -337,7 +350,7 @@ func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.Queu
 
 	change, fee, ok := planChange(inputAmount, outputAmount, tx.InputCount(), tx.OutputCount())
 	if !ok {
-		log.Printf("critical: failed to fund queues %v due to low funding utxo balance got: %d need %d\n", deficit, inputAmount, outputAmount+fee)
+		telemetry.Log(ctx).Error("funding balance too low to fund queues", zap.Any("deficit", deficit), zap.Uint64("balance", inputAmount), zap.Uint64("needed", outputAmount+fee))
 		return deficit
 	}
 
@@ -350,18 +363,18 @@ func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.Queu
 
 	err = tx.Sign()
 	if err != nil {
-		log.Println("critical: failed to sign the transaction ", err.Error())
+		telemetry.Log(ctx).Error("failed to sign funding transaction", zap.Error(err))
 		return deficit
 	}
 
 	if err := verifyScripts(tx, true); err != nil {
-		log.Printf("critical: funding transaction failed validation: %v\n", err)
+		telemetry.Log(ctx).Error("funding transaction failed validation", zap.Error(err))
 		return deficit
 	}
 
 	extendedHex, err := tx.EFHex()
 	if err != nil {
-		log.Printf("ciritcal: failed to constrct extended hex from transaction for fee ingest for queues %v: %v\n", deficit, err.Error())
+		telemetry.Log(ctx).Error("failed to encode funding transaction", zap.Any("deficit", deficit), zap.Error(err))
 		return deficit
 	}
 
@@ -400,7 +413,7 @@ func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.Queu
 	err = repo.StoreFundingTransaction(dbctx, r.db, fundingTx, unxpentUtxos, queueUtxos, changeUtxo)
 	cancel()
 	if err != nil {
-		log.Printf("critical: failed to store funding transaction %s: %v\n", txID, err)
+		telemetry.Log(ctx).Error("failed to store funding transaction", zap.String("txid", txID), zap.Error(err))
 		return deficit
 	}
 
@@ -408,15 +421,19 @@ func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.Queu
 	stored, err := repo.GetTransaction(dbctx, r.db, txID)
 	cancel()
 	if err != nil {
-		log.Printf("critical: failed to load stored funding transaction %s, leaving it to the syncer: %v\n", txID, err)
+		telemetry.Log(ctx).Error("failed to load stored funding transaction, leaving it to the syncer", zap.String("txid", txID), zap.Error(err))
 		return nil
 	}
 
 	if _, err := r.attemptBroadcast(ctx, stored); err != nil {
-		log.Printf("critical: failed to record broadcast of funding transaction %s: %v\n", txID, err)
+		telemetry.Log(ctx).Error("failed to record broadcast of funding transaction", zap.String("txid", txID), zap.Error(err))
 	}
 
-	log.Printf("funded queues %v with tx %s\n", deficit, txID)
+	for queuename, count := range deficit {
+		telemetry.CountN(ctx, telemetry.Metrics.FundingOutputs, int64(count), attribute.String("queue", string(queuename)))
+	}
+	span.SetAttributes(attribute.String("txid", txID))
+	telemetry.Log(ctx).Info("funded queues", zap.Any("deficit", deficit), zap.String("txid", txID))
 	return nil
 }
 
@@ -425,7 +442,7 @@ func (r *RelayService) publishPending(ctx context.Context) bool {
 	pending, err := repo.GetUnpublishedQueueUTXOs(dbctx, r.db)
 	cancel()
 	if err != nil {
-		log.Printf("critical: failed to load unpublished queue utxos: %v\n", err)
+		telemetry.Log(ctx).Error("failed to load unpublished queue utxos", zap.Error(err))
 		return false
 	}
 
@@ -434,7 +451,7 @@ func (r *RelayService) publishPending(ctx context.Context) bool {
 		err := r.mq.Publish(publishctx, rabbitmq.QueueName(utxo.Queue), &utxo.UTXO)
 		cancel()
 		if err != nil {
-			log.Printf("critical: failed to publish utxo %s to queue %s: %v\n", utxo.UtxoID, utxo.Queue, err)
+			telemetry.Log(ctx).Error("failed to publish utxo", zap.String("utxo", utxo.UtxoID), zap.String("queue", utxo.Queue), zap.Error(err))
 			return false
 		}
 
@@ -442,7 +459,7 @@ func (r *RelayService) publishPending(ctx context.Context) bool {
 		err = repo.MarkQueueUTXOPublished(dbctx, r.db, utxo.UtxoID)
 		cancel()
 		if err != nil {
-			log.Printf("critical: failed to mark utxo %s as published: %v\n", utxo.UtxoID, err)
+			telemetry.Log(ctx).Error("failed to mark utxo as published", zap.String("utxo", utxo.UtxoID), zap.Error(err))
 			return false
 		}
 	}
@@ -476,12 +493,18 @@ func sponsorAmount(tx *transaction.Transaction, limit uint64) (uint64, error) {
 	return missing, nil
 }
 
-func (r *RelayService) AddUtxo(ctx context.Context, tx *transaction.Transaction) ([]heldUtxo, error) {
+func (r *RelayService) AddUtxo(ctx context.Context, tx *transaction.Transaction) (taken []heldUtxo, err error) {
+	ctx, span := telemetry.Start(ctx, "take_fee_utxos")
+	defer func() {
+		span.SetAttributes(attribute.Int("fee_utxos", len(taken)))
+		telemetry.End(span, err)
+	}()
 
 	amount, err := sponsorAmount(tx, maxSponsorSats())
 	if err != nil {
 		return nil, err
 	}
+	span.SetAttributes(attribute.Int64("sponsor_sats", int64(amount)))
 	if amount == 0 {
 		return nil, nil
 	}
@@ -550,14 +573,15 @@ func (r *RelayService) takeUtxo(ctx context.Context, queuename rabbitmq.QueueNam
 			}
 			outpoint := model.Outpoint{TxID: utxo.TxID, Vout: utxo.Vout}
 
-			usable, reason, err := r.feeUtxoUsable(ctx, outpoint)
+			reason, detail, err := r.feeUtxoUsable(ctx, outpoint)
 			if err != nil {
 				NackDeliveries([]amqp.Delivery{message})
 				return heldUtxo{}, model.UTXO{}, err
 			}
 
-			if !usable {
-				log.Printf("warning: dropping utxo %s from queue %s, %s\n", utxo.UtxoID, queuename, reason)
+			if reason != "" {
+				telemetry.Count(ctx, telemetry.Metrics.FeeUtxoEvents, attribute.String("queue", string(queuename)), attribute.String("event", "dropped_"+reason))
+				telemetry.Log(ctx).Warn("dropping unusable fee utxo", zap.String("utxo", utxo.UtxoID), zap.String("queue", string(queuename)), zap.String("reason", detail))
 				r.AckDeliveries([]amqp.Delivery{message})
 				continue
 			}
@@ -566,42 +590,50 @@ func (r *RelayService) takeUtxo(ctx context.Context, queuename rabbitmq.QueueNam
 			token, reserved, err := r.reservations.Reserve(reservectx, outpoint)
 			cancel()
 			if err != nil {
-				log.Printf("warning: failed to reserve utxo %s, using it unreserved: %v\n", utxo.UtxoID, err)
+				telemetry.Count(ctx, telemetry.Metrics.FeeUtxoEvents, attribute.String("queue", string(queuename)), attribute.String("event", "taken_unreserved"))
+				telemetry.Log(ctx).Warn("failed to reserve fee utxo, using it unreserved", zap.String("utxo", utxo.UtxoID), zap.Error(err))
 				return heldUtxo{delivery: message, outpoint: outpoint}, utxo, nil
 			}
 
 			if !reserved {
-				log.Printf("warning: utxo %s from queue %s is held by another request, parking it\n", utxo.UtxoID, queuename)
+				telemetry.Count(ctx, telemetry.Metrics.FeeUtxoEvents, attribute.String("queue", string(queuename)), attribute.String("event", "parked"))
+				telemetry.Log(ctx).Warn("fee utxo held by another request, parking it", zap.String("utxo", utxo.UtxoID), zap.String("queue", string(queuename)))
 				r.park(parkedUtxo{delivery: message, outpoint: outpoint})
 				continue
 			}
 
+			telemetry.Count(ctx, telemetry.Metrics.FeeUtxoEvents, attribute.String("queue", string(queuename)), attribute.String("event", "taken"))
 			return heldUtxo{delivery: message, outpoint: outpoint, token: token}, utxo, nil
 		}
 	}
 }
 
-func (r *RelayService) feeUtxoUsable(ctx context.Context, outpoint model.Outpoint) (bool, string, error) {
+const (
+	UNUSABLE_SPENT         = "spent"
+	UNUSABLE_FAILED_PARENT = "failed_parent"
+)
+
+func (r *RelayService) feeUtxoUsable(ctx context.Context, outpoint model.Outpoint) (string, string, error) {
 	dbctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	spentBy, err := repo.GetSpendingTransaction(dbctx, r.db, outpoint)
 	if err != nil {
-		return false, "", err
+		return "", "", err
 	}
 	if spentBy != "" {
-		return false, fmt.Sprintf("already spent by tx %s", spentBy), nil
+		return UNUSABLE_SPENT, fmt.Sprintf("already spent by tx %s", spentBy), nil
 	}
 
 	parentFailed, err := repo.IsTransactionFailed(dbctx, r.db, outpoint.TxID)
 	if err != nil {
-		return false, "", err
+		return "", "", err
 	}
 	if parentFailed {
-		return false, fmt.Sprintf("its funding tx %s failed", outpoint.TxID), nil
+		return UNUSABLE_FAILED_PARENT, fmt.Sprintf("its funding tx %s failed", outpoint.TxID), nil
 	}
 
-	return true, "", nil
+	return "", "", nil
 }
 
 func (r *RelayService) commitHeld(held []heldUtxo) {
@@ -628,7 +660,7 @@ func (r *RelayService) releaseHeld(held []heldUtxo) {
 		err := r.reservations.Release(ctx, h.outpoint, h.token)
 		cancel()
 		if err != nil {
-			log.Printf("warning: failed to release reservation of %s:%d, it expires in %s: %v\n", h.outpoint.TxID, h.outpoint.Vout, reservation.TTL, err)
+			zap.L().Warn("failed to release fee utxo reservation", zap.String("txid", h.outpoint.TxID), zap.Uint32("vout", h.outpoint.Vout), zap.Duration("expires_in", reservation.TTL), zap.Error(err))
 		}
 	}
 }
@@ -669,16 +701,19 @@ func (r *RelayService) resolveParked(ctx context.Context) {
 			continue
 		}
 
-		usable, _, err := r.feeUtxoUsable(ctx, p.outpoint)
+		reason, _, err := r.feeUtxoUsable(ctx, p.outpoint)
 		if err != nil {
 			keep = append(keep, p)
 			continue
 		}
 
-		if !usable {
+		queue := attribute.String("queue", string(rabbitmq.QueueFromRoutingKey(p.delivery.RoutingKey)))
+		if reason != "" {
+			telemetry.Count(ctx, telemetry.Metrics.FeeUtxoEvents, queue, attribute.String("event", "parked_dropped"))
 			r.AckDeliveries([]amqp.Delivery{p.delivery})
 			continue
 		}
+		telemetry.Count(ctx, telemetry.Metrics.FeeUtxoEvents, queue, attribute.String("event", "parked_requeued"))
 		NackDeliveries([]amqp.Delivery{p.delivery})
 	}
 
@@ -693,7 +728,7 @@ func (r *RelayService) AckDeliveries(deliveries []amqp.Delivery) {
 	consumed := make(map[rabbitmq.QueueName]int)
 	for _, delivery := range deliveries {
 		if err := delivery.Ack(false); err != nil {
-			log.Printf("critical: failed to ack utxo message %d: %v\n", delivery.DeliveryTag, err)
+			zap.L().Error("failed to ack utxo message", zap.Uint64("delivery_tag", delivery.DeliveryTag), zap.Error(err))
 			continue
 		}
 		consumed[rabbitmq.QueueFromRoutingKey(delivery.RoutingKey)]++
@@ -708,7 +743,7 @@ func (r *RelayService) AckDeliveries(deliveries []amqp.Delivery) {
 func NackDeliveries(deliveries []amqp.Delivery) {
 	for _, delivery := range deliveries {
 		if err := delivery.Nack(false, true); err != nil {
-			log.Printf("critical: failed to nack utxo message %d: %v\n", delivery.DeliveryTag, err)
+			zap.L().Error("failed to nack utxo message", zap.Uint64("delivery_tag", delivery.DeliveryTag), zap.Error(err))
 		}
 	}
 }

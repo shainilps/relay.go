@@ -12,6 +12,13 @@ auth:
     - username:
       password:
 
+telemetry:
+  enabled: true
+  otlp_endpoint: http://otel-lgtm:4318
+
+log:
+  level: info
+
 #taal(necessary)
 arc:
   token:

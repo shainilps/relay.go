@@ -55,7 +55,7 @@ func (t *Arc) GetPolicy(ctx context.Context) (*PolicyResponse, error) {
 	t.setAuth(req)
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpClient(10 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -88,7 +88,7 @@ func (t *Arc) BroadcastTx(ctx context.Context, txHex string, headers map[string]
 		req.Header.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := httpClient(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -116,7 +116,7 @@ func (t *Arc) GetTxStatus(ctx context.Context, txid string) (*TxStatusResponse, 
 	t.setAuth(req)
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpClient(10 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -144,7 +144,7 @@ func (t *Arc) GetHealth(ctx context.Context) (*HealthResponse, error) {
 	t.setAuth(req)
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := httpClient(5 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

@@ -6,11 +6,14 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
+	"github.com/shainilps/relay/internal/telemetry"
 	"github.com/spf13/viper"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
 )
 
 type Mode string
@@ -72,7 +75,7 @@ func New(config Config) (*Authenticator, error) {
 
 	switch config.Mode {
 	case ModeNone:
-		log.Println("warning: auth.mode is none, every endpoint is open to anyone who can reach it")
+		zap.L().Warn("auth.mode is none, every endpoint is open to anyone who can reach it")
 
 	case ModeToken:
 		if len(config.Tokens) == 0 {
@@ -179,7 +182,8 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		client, ok := a.authenticate(r)
 		if !ok {
-			log.Printf("warning: rejected unauthenticated request from %s to %s\n", r.RemoteAddr, r.URL.Path)
+			telemetry.Count(r.Context(), telemetry.Metrics.AuthRejected, attribute.String("path", r.URL.Path))
+			telemetry.Log(r.Context()).Warn("rejected unauthenticated request", zap.String("remote_addr", r.RemoteAddr), zap.String("path", r.URL.Path))
 			if a.mode == ModeBasic {
 				w.Header().Set("WWW-Authenticate", `Basic realm="relay", charset="UTF-8"`)
 			} else {
@@ -189,6 +193,7 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("relay.client", client))
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), clientKey{}, client)))
 	})
 }

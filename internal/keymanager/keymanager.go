@@ -3,7 +3,6 @@ package keymanager
 import (
 	"encoding/hex"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/shainilps/relay/internal/config"
 	"github.com/shainilps/relay/internal/model"
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 )
 
 const FEE_KEY_INVOICE = "relay fee utxos"
@@ -63,7 +63,7 @@ func (k *Keys) GetFeeAddress() (*script.Address, error) {
 }
 
 func Intiate() {
-	defer log.Println("keys locked and loaded!!")
+	defer zap.L().Info("keys loaded")
 
 	{
 		privKey, err := readWifFile(".key/wif.txt")
@@ -71,7 +71,7 @@ func Intiate() {
 			goto menmonic
 		}
 
-		log.Println("loaded existing key")
+		zap.L().Info("loaded existing key")
 		KeyManager = newKeys(privKey)
 		return
 	}
@@ -80,11 +80,11 @@ menmonic:
 	{
 		privKey, err := readMnemonicFile(".key/mnemonic.txt")
 		if err != nil {
-			log.Println(err)
+			zap.L().Warn("no usable mnemonic file", zap.Error(err))
 			goto generatekey
 		}
 
-		log.Println("generated key from mnemonic")
+		zap.L().Info("generated key from mnemonic")
 		KeyManager = newKeys(privKey)
 		return
 	}
@@ -96,7 +96,7 @@ generatekey:
 			panic(fmt.Errorf("new keys error: %v", err))
 		}
 
-		log.Println("generated new keys")
+		zap.L().Info("generated new keys")
 		KeyManager = newKeys(privKey)
 		return
 	}

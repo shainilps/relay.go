@@ -441,3 +441,40 @@ func MarkChainSpent(ctx context.Context, db *sql.DB, candidate RecoveryCandidate
 		candidate.Outpoint.TxID, candidate.Outpoint.Vout)
 	return err
 }
+
+func GetFundingBalance(ctx context.Context, db *sql.DB) (int64, int64, error) {
+
+	var balance, count int64
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM funding_utxos WHERE is_spent IS FALSE AND chain_spent IS FALSE`).Scan(&balance, &count)
+	return balance, count, err
+}
+
+func CountTransactionsByStatus(ctx context.Context, db *sql.DB) (map[model.TransactionStatus]int64, error) {
+
+	rows, err := db.QueryContext(ctx, `SELECT status, COUNT(*) FROM transactions GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := map[model.TransactionStatus]int64{model.PENDING: 0, model.BROADCASTED: 0, model.SYNCED: 0, model.FAILED: 0}
+	for rows.Next() {
+		var status model.TransactionStatus
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		counts[status] = count
+	}
+
+	return counts, rows.Err()
+}
+
+func CountUnpublishedQueueUTXOs(ctx context.Context, db *sql.DB) (int64, error) {
+
+	var count int64
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM queue_utxos
+		JOIN transactions ON transactions.tx_id = queue_utxos.tx_id
+		WHERE queue_utxos.published IS FALSE AND transactions.status != $1`, model.FAILED).Scan(&count)
+	return count, err
+}

@@ -5,14 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/shainilps/relay/internal/model"
+	"github.com/shainilps/relay/internal/telemetry"
 	"github.com/spf13/viper"
+	"go.opentelemetry.io/otel/attribute"
+	"go.uber.org/zap"
 )
 
 const (
@@ -131,7 +133,7 @@ func (c *Client) connection() (*amqp.Connection, error) {
 		return nil, err
 	}
 	if c.conn != nil {
-		log.Println("reconnected to rabbitmq")
+		zap.L().Info("reconnected to rabbitmq")
 	}
 	c.conn = conn
 	return conn, nil
@@ -152,7 +154,8 @@ func (c *Client) consume(ctx context.Context, queue QueueName) {
 			return
 		}
 
-		log.Printf("warning: consumer for queue %s stopped: %v, reconnecting in %s\n", queue, err, RECONNECT_DELAY)
+		telemetry.Count(ctx, telemetry.Metrics.RabbitReconnected, attribute.String("queue", string(queue)))
+		telemetry.Log(ctx).Warn("consumer stopped, reconnecting", zap.String("queue", string(queue)), zap.Duration("delay", RECONNECT_DELAY), zap.Error(err))
 		select {
 		case <-ctx.Done():
 			return
@@ -272,6 +275,6 @@ func (c *Client) Publish(ctx context.Context, queueName QueueName, utxo *model.U
 		return fmt.Errorf("broker nacked utxo %s for queue %s", utxo.UtxoID, queueName)
 	}
 
-	log.Printf("published utxo %s to queue %s\n", utxo.UtxoID, queueName)
+	telemetry.Log(ctx).Debug("published utxo", zap.String("utxo", utxo.UtxoID), zap.String("queue", string(queueName)))
 	return nil
 }

@@ -3,11 +3,12 @@ package services
 import (
 	"context"
 	"errors"
-	"log"
 	"sync/atomic"
 	"time"
 
+	"github.com/shainilps/relay/internal/telemetry"
 	"github.com/spf13/viper"
+	"go.uber.org/zap"
 )
 
 const (
@@ -67,7 +68,7 @@ func (r *RelayService) refreshFeeRate(ctx context.Context) error {
 
 	rate := FeeRate{Satoshis: miningFee.Satoshis, Bytes: miningFee.Bytes}
 	if rate != currentFeeRate() {
-		log.Printf("fee rate set to %d sats per %d bytes from arc policy\n", rate.Satoshis, rate.Bytes)
+		telemetry.Log(ctx).Info("fee rate set from arc policy", zap.Uint64("satoshis", rate.Satoshis), zap.Uint64("bytes", rate.Bytes))
 	}
 	setFeeRate(rate)
 	return nil
@@ -84,7 +85,7 @@ func (r *RelayService) StartFeePolicy(ctx context.Context) {
 		case <-ticker.C:
 			if err := r.refreshFeeRate(ctx); err != nil {
 				rate := currentFeeRate()
-				log.Printf("warning: failed to refresh fee rate, keeping %d sats per %d bytes: %v\n", rate.Satoshis, rate.Bytes, err)
+				telemetry.Log(ctx).Warn("failed to refresh fee rate, keeping the last one", zap.Uint64("satoshis", rate.Satoshis), zap.Uint64("bytes", rate.Bytes), zap.Error(err))
 			}
 		}
 	}

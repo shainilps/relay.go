@@ -16,6 +16,8 @@ import (
 	"github.com/shainilps/relay/internal/keymanager"
 	"github.com/shainilps/relay/internal/model"
 	"github.com/shainilps/relay/internal/rabbitmq"
+	"github.com/shainilps/relay/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type UtxoQueue interface {
@@ -76,7 +78,32 @@ func parseTransaction(txHex string) (*transaction.Transaction, error) {
 	return tx, nil
 }
 
+func submissionResult(err error) string {
+	switch {
+	case err == nil:
+		return "stored"
+	case errors.Is(err, ErrInvalidTransaction):
+		return "invalid"
+	case errors.Is(err, ErrOutOfFee):
+		return "out_of_fee"
+	default:
+		return "error"
+	}
+}
+
 func (s *RelayService) Broadcast(ctx context.Context, txHex string) (*model.Transaction, error) {
+	stored, err := s.broadcast(ctx, txHex)
+	telemetry.Count(ctx, telemetry.Metrics.TxSubmitted, attribute.String("endpoint", "broadcast"), attribute.String("result", submissionResult(err)))
+	return stored, err
+}
+
+func (s *RelayService) FundAndBroadcast(ctx context.Context, txHex string) (*model.Transaction, error) {
+	stored, err := s.fundAndBroadcast(ctx, txHex)
+	telemetry.Count(ctx, telemetry.Metrics.TxSubmitted, attribute.String("endpoint", "fund_and_broadcast"), attribute.String("result", submissionResult(err)))
+	return stored, err
+}
+
+func (s *RelayService) broadcast(ctx context.Context, txHex string) (*model.Transaction, error) {
 	tx, err := parseTransaction(txHex)
 	if err != nil {
 		return nil, err
@@ -94,7 +121,7 @@ func (s *RelayService) Broadcast(ctx context.Context, txHex string) (*model.Tran
 	return s.submit(ctx, tx, nil)
 }
 
-func (s *RelayService) FundAndBroadcast(ctx context.Context, txHex string) (*model.Transaction, error) {
+func (s *RelayService) fundAndBroadcast(ctx context.Context, txHex string) (*model.Transaction, error) {
 	tx, err := parseTransaction(txHex)
 	if err != nil {
 		return nil, err
@@ -132,7 +159,10 @@ func (s *RelayService) submit(ctx context.Context, tx *transaction.Transaction, 
 	return s.broadcastStored(ctx, stored)
 }
 
-func (s *RelayService) store(ctx context.Context, tx *transaction.Transaction) (*model.Transaction, error) {
+func (s *RelayService) store(ctx context.Context, tx *transaction.Transaction) (stored *model.Transaction, err error) {
+	ctx, span := telemetry.Start(ctx, "store_tx", attribute.String("txid", tx.TxID().String()))
+	defer func() { telemetry.End(span, err) }()
+
 	txHex := tx.Hex()
 	if hasAllSources(tx) {
 		efHex, err := tx.EFHex()
@@ -148,7 +178,7 @@ func (s *RelayService) store(ctx context.Context, tx *transaction.Transaction) (
 	}
 
 	txID := tx.TxID().String()
-	err := repo.CreateTransaction(ctx, s.db, &model.Transaction{
+	err = repo.CreateTransaction(ctx, s.db, &model.Transaction{
 		TxID:          txID,
 		TxHex:         txHex,
 		NextAttemptAt: time.Now().Add(s.syncConfig.RebroadcastInterval).Unix(),

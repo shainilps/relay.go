@@ -49,7 +49,7 @@ func (w *WOCExplorer) GetUtxosForAddress(ctx context.Context, address string) (*
 	}
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := httpClient(15 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -95,7 +95,7 @@ func (w *WOCExplorer) GetOutputSpent(ctx context.Context, txid string, vout uint
 	}
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := httpClient(15 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return OutputUnknown, "", err

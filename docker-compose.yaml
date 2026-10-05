@@ -30,6 +30,15 @@ services:
     container_name: relay-redis
     restart: always
 
+  otel-lgtm:
+    image: grafana/otel-lgtm
+    container_name: relay-otel-lgtm
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - lgtm_data:/data
+
   app:
     build: .
     container_name: relay-app
@@ -45,7 +54,10 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      otel-lgtm:
+        condition: service_started
 
 volumes:
+  lgtm_data:
   rabbitmq_data:
   postgres_data:

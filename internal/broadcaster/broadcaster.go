@@ -1,9 +1,13 @@
 package broadcaster
 
 import (
+	"net/http"
+	"time"
+
 	"github.com/shainilps/relay/internal/config"
 	"github.com/shainilps/relay/internal/model"
 	"github.com/spf13/viper"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type Broadcaster struct {
@@ -28,4 +32,8 @@ func NewBroadcaster() *Broadcaster {
 		Arc:      NewArcPool(providers...),
 		Explorer: NewWOCExplorerProvider(network, viper.GetString("woc.token")),
 	}
+}
+
+func httpClient(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, Transport: otelhttp.NewTransport(http.DefaultTransport)}
 }
