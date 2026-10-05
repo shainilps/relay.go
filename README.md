@@ -87,7 +87,7 @@ Compose runs everything the relay needs: PostgreSQL, RabbitMQ, Redis and Grafana
 
    The relay listens on `:8080`. Database migrations run on startup.
 
-4. Fund the relay. Get the funding address and send coins to it:
+4. Fund the relay. Get the addresses and send coins to `address` (not `feeAddress`):
 
    ```bash
    curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/funding-address
