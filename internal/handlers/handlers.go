@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/shainilps/relay/internal/services"
@@ -13,6 +14,17 @@ type Handler struct {
 
 func NewHandler(service *services.RelayService) *Handler {
 	return &Handler{service: service}
+}
+
+func errorStatus(err error) int {
+	switch {
+	case errors.Is(err, services.ErrInvalidTransaction):
+		return http.StatusBadRequest
+	case errors.Is(err, services.ErrOutOfFee):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func (h *Handler) Broadcast(w http.ResponseWriter, r *http.Request) {
@@ -29,7 +41,7 @@ func (h *Handler) Broadcast(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.service.Broadcast(r.Context(), req.TxHex)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), errorStatus(err))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -50,7 +62,7 @@ func (h *Handler) FundAndBroadcast(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.service.FundAndBroadcast(r.Context(), req.TxHex)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), errorStatus(err))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

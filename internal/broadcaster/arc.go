@@ -85,7 +85,7 @@ func (t *TaalArc) BroadcastTx(ctx context.Context, txHex string, headers map[str
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("BroadcastTx: status %d: %s", resp.StatusCode, string(respBody))
+		return nil, &ArcError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var br BroadcastTxResponse
@@ -113,7 +113,7 @@ func (t *TaalArc) GetTxStatus(ctx context.Context, txid string) (*TxStatusRespon
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GetTxStatus: status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, &ArcError{StatusCode: resp.StatusCode, Body: string(bodyBytes)}
 	}
 
 	var tr TxStatusResponse

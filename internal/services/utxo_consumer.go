@@ -8,8 +8,10 @@ import (
 	"log"
 	"time"
 
+	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 	"github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/shainilps/relay/internal/db/repo"
 	"github.com/shainilps/relay/internal/keymanager"
 	"github.com/shainilps/relay/internal/model"
@@ -21,6 +23,7 @@ import (
 
 const SAT_PER_KB = 100
 const DEFAULT_FUND_AMOUNT = 1
+const FUNDING_RETRY_INTERVAL = 30 * time.Second
 const INPUT_SIZE = 149 // this is can be 149 also because DER singature can be 32/33
 const OUTPUT_SIZE = 34
 
@@ -62,6 +65,37 @@ func (r *RelayService) StartEngine(ctx context.Context) {
 	r.ingestUtxos(ctx)
 }
 
+func fundTarget() int {
+	fundAmount := viper.GetInt("fund_amount")
+	if fundAmount <= 0 {
+		fundAmount = DEFAULT_FUND_AMOUNT
+	}
+	return fundAmount
+}
+
+func (r *RelayService) recordDeficit(counts map[rabbitmq.QueueName]int) {
+	r.deficitMu.Lock()
+	defer r.deficitMu.Unlock()
+	for queuename, count := range counts {
+		r.deficit[queuename] += count
+	}
+}
+
+func (r *RelayService) takeDeficit() map[rabbitmq.QueueName]int {
+	r.deficitMu.Lock()
+	defer r.deficitMu.Unlock()
+	deficit := r.deficit
+	r.deficit = make(map[rabbitmq.QueueName]int)
+	return deficit
+}
+
+func (r *RelayService) signalFunding() {
+	select {
+	case r.fundingChan <- struct{}{}:
+	default:
+	}
+}
+
 func (r *RelayService) ingestUtxos(ctx context.Context) {
 
 	address, err := keymanager.KeyManager.GetAddress()
@@ -74,188 +108,213 @@ func (r *RelayService) ingestUtxos(ctx context.Context) {
 		log.Fatalf("critical: faile to construct the lokcing script from addres: %v\n", err.Error())
 	}
 
-	for queuename := range r.fundingChan {
-		dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		unxpentUtxos, err := repo.GetAllUnspentFundingUTXOs(dbctx, r.db)
+	target := fundTarget()
+	startup := make(map[rabbitmq.QueueName]int)
+	for queuename, queue := range r.queues {
+		if queue.Messages < target {
+			startup[queuename] = target - queue.Messages
+		}
+	}
+	log.Printf("startup funding deficit: %v\n", startup)
+	r.recordDeficit(startup)
+	r.signalFunding()
+
+	var retry <-chan time.Time
+	for {
+		signal := r.fundingChan
+		if retry != nil {
+			signal = nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-signal:
+		case <-retry:
+			retry = nil
+		}
+
+		deficit := r.takeDeficit()
+		if len(deficit) == 0 {
+			continue
+		}
+
+		unfunded := r.fundQueues(ctx, deficit, lockingScript)
+		if len(unfunded) > 0 {
+			r.recordDeficit(unfunded)
+			retry = time.After(FUNDING_RETRY_INTERVAL)
+			log.Printf("warning: unfunded queues %v, retrying in %s\n", unfunded, FUNDING_RETRY_INTERVAL)
+		}
+	}
+}
+
+func (r *RelayService) fundQueues(ctx context.Context, deficit map[rabbitmq.QueueName]int, lockingScript *script.Script) map[rabbitmq.QueueName]int {
+
+	dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	unxpentUtxos, err := repo.GetAllUnspentFundingUTXOs(dbctx, r.db)
+	cancel()
+	if err != nil {
+		log.Printf("critical: failed to fetch funding utxo from db: %v\n", err)
+		return deficit
+	}
+
+	if len(unxpentUtxos) == 0 {
+		log.Println("warning: db is out of funding utxos")
+		return deficit
+	}
+
+	tx := transaction.NewTransaction()
+
+	sgh := sighash.AllForkID
+	unlockingTemplate, err := p2pkh.Unlock(keymanager.KeyManager.GetPrivateKey(), &sgh)
+	if err != nil {
+		log.Printf("critical: failed to contstruct unlockingscript: %v\n", err.Error())
+		return deficit
+	}
+
+	var inputAmount uint64
+	for _, utxo := range unxpentUtxos {
+		err = tx.AddInputFrom(utxo.TxID, utxo.Vout, hex.EncodeToString(lockingScript.Bytes()), utxo.Amount, unlockingTemplate)
 		if err != nil {
-			log.Printf("critical: failed to fetch funding utxo from db: %v\n", err)
-			continue
+			log.Printf("critical: failed to add utxo to transaction: %v\n", err.Error())
 		}
-		cancel()
+		inputAmount += utxo.Amount
+	}
 
-		if len(unxpentUtxos) == 0 {
-			log.Println("warning: db is out of funding utxos")
-			continue
-		}
-
-		tx := transaction.NewTransaction()
-
-		sgh := sighash.AllForkID
-		unlockingTemplate, err := p2pkh.Unlock(keymanager.KeyManager.GetPrivateKey(), &sgh)
-		if err != nil {
-			log.Printf("critical: failed to contstruct unlockingscript: %v\n", err.Error())
-			continue
-		}
-
-		var inputAmount uint64
-		for _, utxo := range unxpentUtxos {
-			err = tx.AddInputFrom(utxo.TxID, utxo.Vout, hex.EncodeToString(lockingScript.Bytes()), utxo.Amount, unlockingTemplate)
-			if err != nil {
-				log.Printf("critical: failed to add utxo to transaction: %v\n", err.Error())
-			}
-			inputAmount += utxo.Amount
-		}
-
-		var outputAmount uint64
-		fundAmount := viper.GetInt("fund_amount")
-		if fundAmount == 0 {
-			fundAmount = DEFAULT_FUND_AMOUNT
-		}
-
-		for range fundAmount {
+	var outputAmount uint64
+	outputQueues := make([]rabbitmq.QueueName, 0)
+	for _, queuename := range rabbitmq.Queues {
+		for range deficit[queuename] {
 			tx.AddOutput(&transaction.TransactionOutput{
 				Satoshis:      rabbitmq.QueueToValue[queuename],
 				LockingScript: lockingScript,
 			})
 			outputAmount += rabbitmq.QueueToValue[queuename]
+			outputQueues = append(outputQueues, queuename)
 		}
-
-		//P2PKH size calc
-		size := uint64(4 + 1 + (tx.InputCount() * INPUT_SIZE) + 1 + (tx.OutputCount() * OUTPUT_SIZE) + 4)
-		fee := uint64((size*100 + 999) / 1000) //+999 does the ceil operation for us
-		if inputAmount < (outputAmount + fee) {
-			log.Printf("critical: failed to fund %s queue due to low funding utxo balance got: %d need %d\n", queuename, inputAmount, outputAmount+fee)
-			continue
-		}
-
-		if inputAmount > (outputAmount + ((size + outputAmount*100 + 999) / 1000)) {
-			size += OUTPUT_SIZE
-			fee = uint64((size*100 + 999) / 1000)
-			tx.AddOutput(&transaction.TransactionOutput{
-				Satoshis:      (inputAmount - outputAmount - fee),
-				LockingScript: lockingScript,
-			})
-		}
-
-		err = tx.Sign()
-		if err != nil {
-			log.Println("critical: failed to sign the transaction ", err.Error())
-			continue
-		}
-
-		extendedHex, err := tx.EFHex()
-		if err != nil {
-			log.Printf("ciritcal: failed to constrct extended hex from transaction for fee ingest for queue %s: %v\n", queuename, err.Error())
-			continue
-		}
-
-		broadcastctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		brodcastResponse, err := r.broadcaster.Arc.BroadcastTx(broadcastctx, extendedHex, nil)
-		if err != nil {
-			log.Printf("ciritcal: failed to broadcast transaction for fee ingest for queue %s: %v\n", queuename, err.Error())
-			continue
-		}
-		cancel()
-
-		dbctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-		err = repo.MarkFundingUTXOsAsSpent(dbctx, r.db, unxpentUtxos)
-		if err != nil {
-			log.Println("critical: failed to mark utxo as spent inconsistent state")
-			continue
-		}
-		cancel()
-
-		outputUtxos := make([]model.UTXO, 0, fundAmount)
-		for i, output := range tx.Outputs {
-			if i == fundAmount {
-				break
-			}
-			outputUtxos = append(outputUtxos, model.UTXO{
-				UtxoID: fmt.Sprintf("%s_%d", brodcastResponse.Txid, i),
-				TxID:   brodcastResponse.Txid,
-				Vout:   uint32(i),
-				Amount: output.Satoshis,
-			})
-		}
-
-		dbctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-		err = repo.CreateFundingUTXOsIfNotExistsAndMarkAsSpent(dbctx, r.db, outputUtxos)
-		if err != nil {
-			log.Printf("critical: failed to record the chage in db  for fee transaction for queue %s:  %v", queuename, err.Error())
-		}
-		cancel()
-
-		dbctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-		if len(tx.Outputs) == fundAmount+1 {
-			output := tx.Outputs[fundAmount]
-			err = repo.CreateFundingUTXO(dbctx, r.db, &model.UTXO{
-				UtxoID: fmt.Sprintf("%s_%d", brodcastResponse.Txid, fundAmount),
-				TxID:   brodcastResponse.Txid,
-				Vout:   uint32(fundAmount),
-				Amount: output.Satoshis,
-			})
-			if err != nil {
-				log.Printf("critical: failed to record the chage in db  for fee transaction for queue %s:  %v", queuename, err.Error())
-			}
-		}
-		cancel()
-
-		for i, output := range tx.Outputs {
-			if i == fundAmount {
-				log.Println("breaking after", i)
-				break
-			}
-			log.Println("funding this:", i)
-			log.Printf("sending this %d to queuname: %v\n", i, queuename)
-
-			err := rabbitmq.Publish(r.ch, queuename, &model.UTXO{
-				UtxoID: fmt.Sprintf("%s_%d", brodcastResponse.Txid, i),
-				TxID:   brodcastResponse.Txid,
-				Vout:   uint32(i),
-				Amount: output.Satoshis,
-			})
-			if err != nil {
-				log.Printf("critical: failed to ingest utxo amount in queue %s for fee transaction:  %v", queuename, err.Error())
-			}
-
-			log.Printf("done this %d to queuname: %v\n", i, queuename)
-		}
-
-		log.Printf("completed funding the queue: %v", queuename)
 	}
+	fundCount := len(outputQueues)
+
+	//P2PKH size calc
+	size := uint64(4 + 1 + (tx.InputCount() * INPUT_SIZE) + 1 + (tx.OutputCount() * OUTPUT_SIZE) + 4)
+	fee := feeForSize(int(size))
+	if inputAmount < (outputAmount + fee) {
+		log.Printf("critical: failed to fund queues %v due to low funding utxo balance got: %d need %d\n", deficit, inputAmount, outputAmount+fee)
+		return deficit
+	}
+
+	if inputAmount > (outputAmount + ((size + outputAmount*100 + 999) / 1000)) {
+		size += OUTPUT_SIZE
+		fee = feeForSize(int(size))
+		tx.AddOutput(&transaction.TransactionOutput{
+			Satoshis:      (inputAmount - outputAmount - fee),
+			LockingScript: lockingScript,
+		})
+	}
+
+	err = tx.Sign()
+	if err != nil {
+		log.Println("critical: failed to sign the transaction ", err.Error())
+		return deficit
+	}
+
+	extendedHex, err := tx.EFHex()
+	if err != nil {
+		log.Printf("ciritcal: failed to constrct extended hex from transaction for fee ingest for queues %v: %v\n", deficit, err.Error())
+		return deficit
+	}
+
+	broadcastctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	brodcastResponse, err := r.broadcaster.Arc.BroadcastTx(broadcastctx, extendedHex, nil)
+	cancel()
+	if err != nil {
+		log.Printf("ciritcal: failed to broadcast transaction for fee ingest for queues %v: %v\n", deficit, err.Error())
+		return deficit
+	}
+
+	dbctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	err = repo.MarkFundingUTXOsAsSpent(dbctx, r.db, unxpentUtxos)
+	cancel()
+	if err != nil {
+		log.Println("critical: failed to mark utxo as spent inconsistent state")
+	}
+
+	outputUtxos := make([]model.UTXO, 0, fundCount)
+	for i := range fundCount {
+		outputUtxos = append(outputUtxos, model.UTXO{
+			UtxoID: fmt.Sprintf("%s_%d", brodcastResponse.Txid, i),
+			TxID:   brodcastResponse.Txid,
+			Vout:   uint32(i),
+			Amount: tx.Outputs[i].Satoshis,
+		})
+	}
+
+	dbctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	err = repo.CreateFundingUTXOsIfNotExistsAndMarkAsSpent(dbctx, r.db, outputUtxos)
+	cancel()
+	if err != nil {
+		log.Printf("critical: failed to record the queue utxos in db for fee transaction %s: %v", brodcastResponse.Txid, err.Error())
+	}
+
+	if len(tx.Outputs) == fundCount+1 {
+		dbctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		err = repo.CreateFundingUTXO(dbctx, r.db, &model.UTXO{
+			UtxoID: fmt.Sprintf("%s_%d", brodcastResponse.Txid, fundCount),
+			TxID:   brodcastResponse.Txid,
+			Vout:   uint32(fundCount),
+			Amount: tx.Outputs[fundCount].Satoshis,
+		})
+		cancel()
+		if err != nil {
+			log.Printf("critical: failed to record the change in db for fee transaction %s: %v", brodcastResponse.Txid, err.Error())
+		}
+	}
+
+	unfunded := make(map[rabbitmq.QueueName]int)
+	for i, utxo := range outputUtxos {
+		queuename := outputQueues[i]
+		err := rabbitmq.Publish(r.ch, queuename, &utxo)
+		if err != nil {
+			log.Printf("critical: failed to ingest utxo %s in queue %s: %v", utxo.UtxoID, queuename, err.Error())
+			unfunded[queuename]++
+		}
+	}
+
+	log.Printf("funded queues %v with tx %s\n", deficit, brodcastResponse.Txid)
+	return unfunded
 }
 
-func (r *RelayService) AddUtxo(txhex string) (string, error) {
+func (r *RelayService) AddUtxo(tx *transaction.Transaction) ([]amqp.Delivery, error) {
 
 	address, err := keymanager.KeyManager.GetAddress()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	lockingScript, err := p2pkh.Lock(address)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	lockingScriptStr := hex.EncodeToString(lockingScript.Bytes())
 
 	sgh := sighash.All | sighash.AnyOneCanPay | sighash.ForkID
 	unlockingTemplate, err := p2pkh.Unlock(keymanager.KeyManager.GetPrivateKey(), &sgh)
 	if err != nil {
-		return "", err
-	}
-
-	tx, err := transaction.NewTransactionFromHex(txhex)
-	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	//intially we do need a utxo
-	size := tx.Size()
-	fee := uint64((size*100 + 999) / 1000)
+	fee := feeForSize(tx.Size())
 
 	// we can predict the input size so we can calcuate the fund array with the fee
 	//TODO: change the logic of funding to mutliqueue
 
 	queunames := CalcuateQueues(fee)
+
+	deliveries := make([]amqp.Delivery, 0, len(queunames))
+	fail := func(err error) ([]amqp.Delivery, error) {
+		NackDeliveries(deliveries)
+		return nil, err
+	}
 
 	for _, queuename := range queunames {
 
@@ -264,17 +323,22 @@ func (r *RelayService) AddUtxo(txhex string) (string, error) {
 		select {
 
 		case <-timeout:
-			return "", fmt.Errorf("timed out waiting utxo from queue %v, out of fee", queuename)
+			return fail(fmt.Errorf("%w: timed out waiting utxo from queue %v", ErrOutOfFee, queuename))
 
-		case message := <-r.consumers[queuename]:
+		case message, ok := <-r.consumers[queuename]:
+			if !ok {
+				return fail(fmt.Errorf("consumer for queue %v is closed", queuename))
+			}
+			deliveries = append(deliveries, message)
+
 			var utxo model.UTXO
 			err = json.Unmarshal(message.Body, &utxo)
 			if err != nil {
-				return "", err
+				return fail(err)
 			}
 			err = tx.AddInputFrom(utxo.TxID, utxo.Vout, lockingScriptStr, utxo.Amount, unlockingTemplate)
 			if err != nil {
-				return "", err
+				return fail(err)
 			}
 
 		}
@@ -282,31 +346,32 @@ func (r *RelayService) AddUtxo(txhex string) (string, error) {
 
 	err = tx.Sign()
 	if err != nil {
-		return "", err
+		return fail(err)
 	}
 
-	return tx.EFHex()
+	return deliveries, nil
 }
 
-func (r *RelayService) StartQueueMonitor(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	fundAmount := viper.GetInt("fund_amount")
-	if fundAmount == 0 {
-		fundAmount = DEFAULT_FUND_AMOUNT
+func (r *RelayService) AckDeliveries(deliveries []amqp.Delivery) {
+	consumed := make(map[rabbitmq.QueueName]int)
+	for _, delivery := range deliveries {
+		if err := delivery.Ack(false); err != nil {
+			log.Printf("critical: failed to ack utxo message %d: %v\n", delivery.DeliveryTag, err)
+			continue
+		}
+		consumed[rabbitmq.QueueName(delivery.RoutingKey)]++
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
+	if len(consumed) > 0 {
+		r.recordDeficit(consumed)
+		r.signalFunding()
+	}
+}
 
-		case <-ticker.C:
-			for queuename, queue := range r.queues {
-				if queue.Messages < fundAmount {
-					r.fundingChan <- queuename
-				}
-			}
+func NackDeliveries(deliveries []amqp.Delivery) {
+	for _, delivery := range deliveries {
+		if err := delivery.Nack(false, true); err != nil {
+			log.Printf("critical: failed to nack utxo message %d: %v\n", delivery.DeliveryTag, err)
 		}
 	}
 }
@@ -318,7 +383,7 @@ func CalcuateQueues(amount uint64) []rabbitmq.QueueName {
 
 	for currentAmount > 0 {
 		queuename := GetBestQueue(currentAmount)
-		feeForQueue := uint64((INPUT_SIZE*100 + 999) / 1000)
+		feeForQueue := feeForSize(INPUT_SIZE)
 		queuenames = append(queuenames, queuename)
 		if currentAmount+feeForQueue < rabbitmq.QueueToValue[queuename] {
 			break
@@ -331,7 +396,7 @@ func CalcuateQueues(amount uint64) []rabbitmq.QueueName {
 }
 
 func GetBestQueue(amount uint64) rabbitmq.QueueName {
-	margin := uint64((INPUT_SIZE*100 + 999) / 1000)
+	margin := feeForSize(INPUT_SIZE)
 	sum := uint64(0)
 
 	for i, queuename := range rabbitmq.Queues {

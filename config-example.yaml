@@ -20,3 +20,10 @@ db:
 
 #default 1
 fund_amount: 1
+
+sync:
+  max_attempts: 5
+  max_age: 24h
+  rebroadcast_interval: 10m
+  poll_interval: 10s
+  batch_size: 50

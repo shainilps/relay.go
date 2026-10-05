@@ -1,0 +1,199 @@
+package services
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/shainilps/relay/internal/broadcaster"
+	"github.com/shainilps/relay/internal/db/repo"
+	"github.com/shainilps/relay/internal/model"
+	"github.com/spf13/viper"
+)
+
+const (
+	DEFAULT_MAX_ATTEMPTS         = 5
+	DEFAULT_MAX_AGE              = 24 * time.Hour
+	DEFAULT_REBROADCAST_INTERVAL = 10 * time.Minute
+	DEFAULT_SYNC_POLL_INTERVAL   = 10 * time.Second
+	DEFAULT_SYNC_BATCH_SIZE      = 50
+
+	ARC_STATUS_MINED = "MINED"
+)
+
+type SyncConfig struct {
+	MaxAttempts         int
+	MaxAge              time.Duration
+	RebroadcastInterval time.Duration
+	PollInterval        time.Duration
+	BatchSize           int
+}
+
+func LoadSyncConfig() SyncConfig {
+	cfg := SyncConfig{
+		MaxAttempts:         viper.GetInt("sync.max_attempts"),
+		MaxAge:              viper.GetDuration("sync.max_age"),
+		RebroadcastInterval: viper.GetDuration("sync.rebroadcast_interval"),
+		PollInterval:        viper.GetDuration("sync.poll_interval"),
+		BatchSize:           viper.GetInt("sync.batch_size"),
+	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = DEFAULT_MAX_ATTEMPTS
+	}
+	if cfg.MaxAge <= 0 {
+		cfg.MaxAge = DEFAULT_MAX_AGE
+	}
+	if cfg.RebroadcastInterval <= 0 {
+		cfg.RebroadcastInterval = DEFAULT_REBROADCAST_INTERVAL
+	}
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = DEFAULT_SYNC_POLL_INTERVAL
+	}
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = DEFAULT_SYNC_BATCH_SIZE
+	}
+	return cfg
+}
+
+type syncAction int
+
+const (
+	actionBroadcast syncAction = iota
+	actionMarkSynced
+	actionMarkFailed
+	actionMarkExpired
+)
+
+func decide(tx *model.Transaction, mined bool, expired bool, maxAttempts int) syncAction {
+	if tx.Attempts > 0 && mined {
+		return actionMarkSynced
+	}
+	if expired {
+		return actionMarkExpired
+	}
+	if tx.Attempts >= maxAttempts {
+		return actionMarkFailed
+	}
+	return actionBroadcast
+}
+
+func (r *RelayService) attemptBroadcast(ctx context.Context, tx *model.Transaction) (bool, error) {
+	broadcastctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	_, broadcastErr := r.broadcaster.Arc.BroadcastTx(broadcastctx, tx.TxHex, nil)
+	cancel()
+
+	now := time.Now()
+	nextAttemptAt := now.Add(r.syncConfig.RebroadcastInterval).Unix()
+
+	dbctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if broadcaster.IsUnreachable(broadcastErr) {
+		log.Printf("warning: arc unreachable while broadcasting tx %s, not counted as an attempt: %v\n", tx.TxID, broadcastErr)
+		return true, repo.RecordUnreachable(dbctx, r.db, tx.TxID, broadcastErr.Error(), now.Unix())
+	}
+
+	if broadcastErr != nil {
+		log.Printf("warning: broadcast attempt %d for tx %s rejected: %v\n", tx.Attempts+1, tx.TxID, broadcastErr)
+		return false, repo.RecordBroadcastError(dbctx, r.db, tx.TxID, broadcastErr.Error(), nextAttemptAt)
+	}
+
+	return false, repo.MarkBroadcasted(dbctx, r.db, tx.TxID, now.Unix(), nextAttemptAt)
+}
+
+func (r *RelayService) StartSyncer(ctx context.Context) {
+	ticker := time.NewTicker(r.syncConfig.PollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-ticker.C:
+			r.syncDue(ctx)
+		}
+	}
+}
+
+func (r *RelayService) syncDue(ctx context.Context) {
+	dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	transactions, err := repo.GetDueTransactions(dbctx, r.db, time.Now().Unix(), r.syncConfig.BatchSize)
+	cancel()
+	if err != nil {
+		log.Printf("critical: failed to fetch due transactions: %v\n", err)
+		return
+	}
+
+	for i := range transactions {
+		if ctx.Err() != nil {
+			return
+		}
+		arcDown, err := r.syncTransaction(ctx, &transactions[i])
+		if err != nil {
+			log.Printf("critical: failed to sync tx %s: %v\n", transactions[i].TxID, err)
+		}
+		if arcDown {
+			log.Println("warning: arc unreachable, pausing sync until the next poll")
+			return
+		}
+	}
+}
+
+func (r *RelayService) isExpired(tx *model.Transaction, now time.Time) bool {
+	return now.Sub(time.Unix(tx.CreatedAt, 0)) >= r.syncConfig.MaxAge
+}
+
+func (r *RelayService) syncTransaction(ctx context.Context, tx *model.Transaction) (bool, error) {
+	expired := r.isExpired(tx, time.Now())
+	mined := false
+	var blockHash string
+	var blockHeight uint64
+
+	if tx.Attempts > 0 {
+		statusctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		status, err := r.broadcaster.Arc.GetTxStatus(statusctx, tx.TxID)
+		cancel()
+		switch {
+		case err == nil:
+			if status.TxStatus == ARC_STATUS_MINED {
+				mined = true
+				blockHash = status.BlockHash
+				blockHeight = status.BlockHeight
+			}
+		case broadcaster.IsUnreachable(err) && !expired:
+			return true, nil
+		default:
+			log.Printf("warning: failed to get status of tx %s: %v\n", tx.TxID, err)
+		}
+	}
+
+	dbctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	switch decide(tx, mined, expired, r.syncConfig.MaxAttempts) {
+	case actionMarkSynced:
+		log.Printf("tx %s mined in block %d\n", tx.TxID, blockHeight)
+		return false, repo.MarkSynced(dbctx, r.db, tx.TxID, blockHash, blockHeight)
+
+	case actionMarkExpired:
+		errMsg := fmt.Sprintf("expired after %s without being mined", r.syncConfig.MaxAge)
+		if tx.LastError != "" {
+			errMsg = fmt.Sprintf("%s, last error: %s", errMsg, tx.LastError)
+		}
+		log.Printf("critical: tx %s failed: %s\n", tx.TxID, errMsg)
+		return false, repo.MarkFailed(dbctx, r.db, tx.TxID, errMsg)
+
+	case actionMarkFailed:
+		errMsg := fmt.Sprintf("not mined after %d broadcast attempts", tx.Attempts)
+		if tx.LastError != "" {
+			errMsg = fmt.Sprintf("%s, last error: %s", errMsg, tx.LastError)
+		}
+		log.Printf("critical: tx %s failed: %s\n", tx.TxID, errMsg)
+		return false, repo.MarkFailed(dbctx, r.db, tx.TxID, errMsg)
+
+	default:
+		return r.attemptBroadcast(ctx, tx)
+	}
+}

@@ -9,8 +9,10 @@ const (
 )
 
 const (
-	SYNCED   TransactionStatus = "SYNCED"
-	UNSYNCED TransactionStatus = "UNSYNCED"
+	PENDING     TransactionStatus = "PENDING"
+	BROADCASTED TransactionStatus = "BROADCASTED"
+	SYNCED      TransactionStatus = "SYNCED"
+	FAILED      TransactionStatus = "FAILED"
 )
 
 type UTXO struct {
@@ -20,10 +22,21 @@ type UTXO struct {
 	Amount uint64
 }
 
+type Outpoint struct {
+	TxID string
+	Vout uint32
+}
+
 type Transaction struct {
-	TxID    string
-	TxHex   string
-	Height  uint64
-	Network Network
-	Status  TransactionStatus
+	TxID            string            `json:"txid"`
+	TxHex           string            `json:"-"`
+	Network         Network           `json:"network"`
+	Status          TransactionStatus `json:"status"`
+	Attempts        int               `json:"attempts"`
+	LastBroadcastAt *int64            `json:"lastBroadcastAt,omitempty"`
+	NextAttemptAt   int64             `json:"-"`
+	BlockHash       string            `json:"blockHash,omitempty"`
+	BlockHeight     uint64            `json:"blockHeight,omitempty"`
+	LastError       string            `json:"lastError,omitempty"`
+	CreatedAt       int64             `json:"createdAt"`
 }

@@ -44,13 +44,11 @@ func main() {
 
 	bd := broadcaster.NewBroadcaster()
 
-	fundingChan := make(chan rabbitmq.QueueName)
-
-	service := services.NewRelayService(db, ch, bd, consumers, queues, fundingChan)
+	service := services.NewRelayService(db, ch, bd, consumers, queues)
 
 	appctx, cancel := context.WithCancel(context.Background())
 	go service.StartEngine(appctx)
-	go service.StartQueueMonitor(appctx)
+	go service.StartSyncer(appctx)
 
 	handler := handlers.NewHandler(service)
 
@@ -79,7 +77,6 @@ func main() {
 		log.Println("server shutdown gracefully")
 
 		cancel()
-		close(fundingChan)
 		serverClose <- struct{}{}
 	}()
 

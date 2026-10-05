@@ -3,13 +3,19 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
 
+	"github.com/bsv-blockchain/go-sdk/transaction"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/shainilps/relay/internal/broadcaster"
 	"github.com/shainilps/relay/internal/db/repo"
 	"github.com/shainilps/relay/internal/keymanager"
 	"github.com/shainilps/relay/internal/model"
 	"github.com/shainilps/relay/internal/rabbitmq"
+	"github.com/spf13/viper"
 )
 
 type RelayService struct {
@@ -18,40 +24,132 @@ type RelayService struct {
 	broadcaster *broadcaster.Broadcaster
 	consumers   map[rabbitmq.QueueName]<-chan amqp.Delivery
 	queues      map[rabbitmq.QueueName]amqp.Queue
-	fundingChan chan rabbitmq.QueueName
+	fundingChan chan struct{}
+	deficitMu   sync.Mutex
+	deficit     map[rabbitmq.QueueName]int
+	syncConfig  SyncConfig
 }
 
-func NewRelayService(db *sql.DB, ch *amqp.Channel, broadcaster *broadcaster.Broadcaster, consumers map[rabbitmq.QueueName]<-chan amqp.Delivery, queues map[rabbitmq.QueueName]amqp.Queue, fundingChan chan rabbitmq.QueueName) *RelayService {
+func NewRelayService(db *sql.DB, ch *amqp.Channel, broadcaster *broadcaster.Broadcaster, consumers map[rabbitmq.QueueName]<-chan amqp.Delivery, queues map[rabbitmq.QueueName]amqp.Queue) *RelayService {
 	return &RelayService{
-		ch, db, broadcaster, consumers, queues, fundingChan,
+		ch:          ch,
+		db:          db,
+		broadcaster: broadcaster,
+		consumers:   consumers,
+		queues:      queues,
+		fundingChan: make(chan struct{}, 1),
+		deficit:     make(map[rabbitmq.QueueName]int),
+		syncConfig:  LoadSyncConfig(),
 	}
 }
 
-func (s *RelayService) Broadcast(ctx context.Context, txHex string) (*broadcaster.BroadcastTxResponse, error) {
-	response, err := s.broadcaster.Arc.BroadcastTx(ctx, txHex, nil)
+func parseTransaction(txHex string) (*transaction.Transaction, error) {
+	tx, err := transaction.NewTransactionFromHex(txHex)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrInvalidTransaction, err)
 	}
-	err = repo.CreateTransaction(ctx, s.db, &model.Transaction{
-		TxID:    response.Txid,
-		TxHex:   response.BlockHash,
-		Height:  response.BlockHeight,
-		Network: model.MAIN,
-		Status:  model.UNSYNCED,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return response, nil
+	return tx, nil
 }
 
-func (s *RelayService) FundAndBroadcast(ctx context.Context, txHex string) (*broadcaster.BroadcastTxResponse, error) {
-	txHexWithFee, err := s.AddUtxo(txHex)
+func (s *RelayService) Broadcast(ctx context.Context, txHex string) (*model.Transaction, error) {
+	tx, err := parseTransaction(txHex)
 	if err != nil {
 		return nil, err
 	}
-	return s.Broadcast(ctx, txHexWithFee)
+
+	if err := verifyScripts(tx, false); err != nil {
+		return nil, err
+	}
+	if hasAllSources(tx) {
+		if err := checkFee(tx); err != nil {
+			return nil, err
+		}
+	}
+
+	return s.submit(ctx, tx, nil)
+}
+
+func (s *RelayService) FundAndBroadcast(ctx context.Context, txHex string) (*model.Transaction, error) {
+	tx, err := parseTransaction(txHex)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := verifyScripts(tx, true); err != nil {
+		return nil, err
+	}
+
+	deliveries, err := s.AddUtxo(tx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := verifyScripts(tx, true); err != nil {
+		NackDeliveries(deliveries)
+		return nil, err
+	}
+	if err := checkFee(tx); err != nil {
+		NackDeliveries(deliveries)
+		return nil, err
+	}
+
+	return s.submit(ctx, tx, deliveries)
+}
+
+func (s *RelayService) submit(ctx context.Context, tx *transaction.Transaction, deliveries []amqp.Delivery) (*model.Transaction, error) {
+	stored, err := s.store(ctx, tx)
+	if err != nil {
+		NackDeliveries(deliveries)
+		return nil, err
+	}
+	s.AckDeliveries(deliveries)
+
+	return s.broadcastStored(ctx, stored)
+}
+
+func (s *RelayService) store(ctx context.Context, tx *transaction.Transaction) (*model.Transaction, error) {
+	txHex := tx.Hex()
+	if hasAllSources(tx) {
+		efHex, err := tx.EFHex()
+		if err != nil {
+			return nil, err
+		}
+		txHex = efHex
+	}
+
+	inputs := make([]model.Outpoint, 0, len(tx.Inputs))
+	for _, input := range tx.Inputs {
+		inputs = append(inputs, model.Outpoint{TxID: input.SourceTXID.String(), Vout: input.SourceTxOutIndex})
+	}
+
+	txID := tx.TxID().String()
+	err := repo.CreateTransaction(ctx, s.db, &model.Transaction{
+		TxID:          txID,
+		TxHex:         txHex,
+		Network:       model.Network(viper.GetString("app.network")),
+		NextAttemptAt: time.Now().Add(s.syncConfig.RebroadcastInterval).Unix(),
+	}, inputs)
+	var doubleSpendErr *repo.DoubleSpendError
+	if errors.As(err, &doubleSpendErr) {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidTransaction, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return repo.GetTransaction(ctx, s.db, txID)
+}
+
+func (s *RelayService) broadcastStored(ctx context.Context, stored *model.Transaction) (*model.Transaction, error) {
+	if stored.Status == model.PENDING && stored.Attempts == 0 {
+		if _, err := s.attemptBroadcast(ctx, stored); err != nil {
+			return nil, err
+		}
+	}
+
+	dbctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return repo.GetTransaction(dbctx, s.db, stored.TxID)
 }
 
 func (s *RelayService) GetFundingAddress() (string, error) {
