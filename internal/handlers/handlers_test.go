@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shainilps/relay/internal/auth"
 	"github.com/shainilps/relay/internal/db/dbtest"
 	"github.com/shainilps/relay/internal/db/repo"
 	"github.com/shainilps/relay/internal/model"
@@ -53,5 +54,35 @@ func TestGetTransaction(t *testing.T) {
 
 	if got := request(http.MethodPost, "/tx?txid="+txID).Code; got != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 for POST, got %d", got)
+	}
+}
+
+func TestRouterProtectsEverythingButHealth(t *testing.T) {
+	authenticator, err := auth.New(auth.Config{Mode: auth.ModeToken, Tokens: []auth.Token{{Name: "wallet", Token: strings.Repeat("w", 40)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(NewHandler(services.NewRelayService(nil, nil, nil, nil)), authenticator.Middleware)
+
+	health := httptest.NewRecorder()
+	router.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("expected /health to be open, got %d", health.Code)
+	}
+
+	for _, path := range []string{"/broadcast", "/fund-and-broadcast", "/funding-address", "/tx?txid=" + strings.Repeat("ab", 32), "/unknown"} {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("expected %s to need auth, got %d", path, recorder.Code)
+		}
+	}
+
+	authorized := httptest.NewRequest(http.MethodPost, "/tx", nil)
+	authorized.Header.Set("Authorization", "Bearer "+strings.Repeat("w", 40))
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, authorized)
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected an authorized request to reach the handler, got %d", recorder.Code)
 	}
 }

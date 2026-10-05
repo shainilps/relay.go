@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shainilps/relay/internal/auth"
 	"github.com/shainilps/relay/internal/broadcaster"
 	"github.com/shainilps/relay/internal/config"
 	"github.com/shainilps/relay/internal/db"
@@ -27,6 +28,11 @@ func init() {
 }
 
 func main() {
+
+	authenticator, err := auth.Load()
+	if err != nil {
+		log.Fatalf("invalid auth config: %v", err)
+	}
 
 	network := config.Network()
 	log.Printf("running on %s network\n", network)
@@ -57,16 +63,11 @@ func main() {
 
 	handler := handlers.NewHandler(service)
 
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/broadcast", handler.Broadcast)
-	mux.HandleFunc("/fund-and-broadcast", handler.FundAndBroadcast)
-	mux.HandleFunc("/funding-address", handler.GetFundingAddress)
-	mux.HandleFunc("/tx", handler.GetTransaction)
+	router := handlers.NewRouter(handler, authenticator.Middleware)
 
 	server := http.Server{
 		Addr:    viper.GetString("app.addr"),
-		Handler: mux,
+		Handler: router,
 	}
 
 	sigchan := make(chan os.Signal, 1)

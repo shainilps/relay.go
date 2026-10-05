@@ -85,6 +85,28 @@ func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+func NewRouter(h *Handler, authenticate func(http.Handler) http.Handler) http.Handler {
+	api := http.NewServeMux()
+	api.HandleFunc("/broadcast", h.Broadcast)
+	api.HandleFunc("/fund-and-broadcast", h.FundAndBroadcast)
+	api.HandleFunc("/funding-address", h.GetFundingAddress)
+	api.HandleFunc("/tx", h.GetTransaction)
+
+	root := http.NewServeMux()
+	root.HandleFunc("/health", Health)
+	root.Handle("/", authenticate(api))
+	return root
+}
+
+func Health(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
 func (h *Handler) GetFundingAddress(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

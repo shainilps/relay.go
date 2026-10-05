@@ -3,6 +3,15 @@ app:
   network: MAIN # MAIN/TEST
   addr: :8080
 
+auth:
+  mode: token
+  tokens:
+    - name: default
+      token:
+  users:
+    - username:
+      password:
+
 #taal(necessary)
 arc:
   token:

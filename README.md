@@ -50,6 +50,10 @@ Minimal setup (3 necessary + 1 optional):
 - **Database:** PostgreSQL (`db.url`), persisted via Docker volume
 - **Fee rate:** `fee.sat_per_byte = 100` (as of Nov 15) — change only if policy changes
 - **Taal ARC token:** required, set in `config.yaml`
+- **Auth:** `auth.mode` is required: `token` (clients send `Authorization: Bearer <token>`, tokens of
+  32+ characters, one named token per client), `basic` (username and password of 12+ characters) or
+  `none` (local development only). Every endpoint except `GET /health` needs it. Put the relay behind
+  a TLS proxy (Caddy, nginx) in production, tokens and passwords are readable over plain HTTP.
 
 > For current fee rates:
 >
