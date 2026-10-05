@@ -26,6 +26,7 @@ redis:
 
 #default 1
 fund_amount: 1
+max_sponsor_sats: 20000
 funding_scan_interval: 5m
 recovery_interval: 10m
 fee_policy_interval: 30m

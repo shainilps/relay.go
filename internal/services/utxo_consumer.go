@@ -25,6 +25,7 @@ import (
 const DEFAULT_FUND_AMOUNT = 1
 const FUNDING_RETRY_INTERVAL = 30 * time.Second
 const DEFAULT_FUNDING_SCAN_INTERVAL = 5 * time.Minute
+const DEFAULT_MAX_SPONSOR_SATS = 20000
 const PARKED_CHECK_INTERVAL = time.Second
 const FUNDING_LOCK = "funding"
 const FUNDING_LOCK_TTL = 5 * time.Minute
@@ -450,7 +451,41 @@ func (r *RelayService) publishPending(ctx context.Context) bool {
 	return true
 }
 
+func maxSponsorSats() uint64 {
+	limit := viper.GetUint64("max_sponsor_sats")
+	if limit == 0 {
+		limit = DEFAULT_MAX_SPONSOR_SATS
+	}
+	return limit
+}
+
+func sponsorAmount(tx *transaction.Transaction, limit uint64) (uint64, error) {
+	inputAmount, err := tx.TotalInputSatoshis()
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrInvalidTransaction, err)
+	}
+
+	needed := tx.TotalOutputSatoshis() + feeForSize(tx.Size())
+	if inputAmount >= needed {
+		return 0, nil
+	}
+
+	missing := needed - inputAmount
+	if missing > limit {
+		return 0, fmt.Errorf("%w: needs %d sats from the relay, the limit is %d", ErrInvalidTransaction, missing, limit)
+	}
+	return missing, nil
+}
+
 func (r *RelayService) AddUtxo(ctx context.Context, tx *transaction.Transaction) ([]heldUtxo, error) {
+
+	amount, err := sponsorAmount(tx, maxSponsorSats())
+	if err != nil {
+		return nil, err
+	}
+	if amount == 0 {
+		return nil, nil
+	}
 
 	address, err := keymanager.KeyManager.GetFeeAddress()
 	if err != nil {
@@ -468,13 +503,7 @@ func (r *RelayService) AddUtxo(ctx context.Context, tx *transaction.Transaction)
 		return nil, err
 	}
 
-	//intially we do need a utxo
-	fee := feeForSize(tx.Size())
-
-	// we can predict the input size so we can calcuate the fund array with the fee
-	//TODO: change the logic of funding to mutliqueue
-
-	queunames := CalcuateQueues(fee)
+	queunames := CalcuateQueues(amount)
 
 	held := make([]heldUtxo, 0, len(queunames))
 	fail := func(err error) ([]heldUtxo, error) {
